@@ -141,6 +141,49 @@ const Export = (function () {
     return html;
   }
 
+  function buildResumenJsonPayload(summary) {
+    return {
+      fecha: dateStamp(summary.date),
+      pestana: 'Resumen',
+      ventas: {
+        totalUnidades: summary.sales.totalUnits,
+        totalDinero: summary.sales.totalMoney,
+        porCategoria: summary.sales.grouped
+      },
+      utilidad: summary.margin ? {
+        total: summary.margin.total,
+        costoTotal: summary.margin.totalCost,
+        margenPorcentaje: summary.margin.percent,
+        porProducto: summary.margin.grouped
+      } : null,
+      entradas: {
+        totalUnidades: summary.entries.totalUnits,
+        totalDinero: summary.entries.totalMoney || 0,
+        porCategoria: summary.entries.grouped
+      },
+      salidas: {
+        totalUnidades: summary.exits.totalUnits,
+        porCategoria: summary.exits.grouped
+      }
+    };
+  }
+
+  function exportReportCsv(bundle) {
+    const rows = bundle.resumen ? buildDailyReportRows(bundle.summary) : bundle.rows;
+    download(rowsToCsv(rows), bundle.baseName + '.csv', 'text/csv;charset=utf-8');
+  }
+
+  function exportReportExcel(bundle) {
+    const rows = bundle.resumen ? buildDailyReportRows(bundle.summary) : bundle.rows;
+    const html = rowsToExcelHtml(rows, bundle.baseName);
+    download('\ufeff' + html, bundle.baseName + '.xls', 'application/vnd.ms-excel;charset=utf-8');
+  }
+
+  function exportReportJson(bundle) {
+    const payload = bundle.resumen ? buildResumenJsonPayload(bundle.summary) : bundle.json;
+    download(JSON.stringify(payload, null, 2), bundle.baseName + '.json', 'application/json;charset=utf-8');
+  }
+
   function exportDailyCsv(summary) {
     const rows = buildDailyReportRows(summary);
     const filename = 'reporte-' + dateStamp(summary.date) + '.csv';
@@ -272,6 +315,9 @@ const Export = (function () {
     exportDailyCsv,
     exportDailyExcel,
     exportDailyJson,
+    exportReportCsv,
+    exportReportExcel,
+    exportReportJson,
     defaultBackupFilename,
     sanitizeBackupFilename,
     saveBackupWithPicker,

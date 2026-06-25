@@ -935,6 +935,269 @@ const App = (function () {
     return DB.formatDate(date);
   }
 
+  function groupModeExportLabel(state) {
+    if (!state) return '';
+    if (isGridSortState(state)) {
+      return 'Grilla ' + (state.groupBy === 'cat' ? 'categoría × presentación' : 'presentación × categoría');
+    }
+    const labels = {
+      cat: 'Categoría',
+      pres: 'Presentación',
+      time: 'Fecha',
+      value: 'Valor',
+      qty: 'Cantidad'
+    };
+    return labels[state.groupBy] || state.groupBy;
+  }
+
+  function buildItemExportRow(item, productMap, type, groupBy, options) {
+    const prod = productMap[item.productId] || {};
+    const meta = getReportItemMeta(item, productMap, type);
+    const time = DB.formatTime(item.timestamp);
+    const groupKey = options.groupKey || '';
+
+    let title = prod.presentationName || 'Desconocido';
+    let detail = prod.categoryName || '';
+    if (groupBy === 'cat') {
+      title = prod.presentationName || 'Desconocido';
+      detail = time;
+    } else if (groupBy === 'pres') {
+      title = prod.categoryName || 'Sin categoría';
+      detail = (prod.presentationName || '') + ' · ' + time;
+    } else if (groupBy === 'time') {
+      title = prod.presentationName || 'Desconocido';
+      detail = (prod.categoryName || '') + ' · ' + time;
+    } else {
+      detail = (prod.categoryName || '') + ' · ' + time;
+    }
+
+    if (type === 'sale') {
+      const margin = options.showMargin
+        ? (item.unitPrice - (prod.purchasePrice || 0)) * item.quantity
+        : null;
+      const row = [groupKey, title, detail, item.quantity, DB.formatMoney(item.unitPrice), DB.formatMoney(meta.value)];
+      if (options.showMargin) row.push(DB.formatMoney(margin || 0));
+      return row;
+    }
+    if (type === 'in') {
+      return [
+        groupKey,
+        title,
+        detail,
+        item.quantity,
+        item.purchasePrice ? DB.formatMoney(item.purchasePrice) : '',
+        DB.formatMoney(meta.value),
+        item.note || ''
+      ];
+    }
+    return [groupKey, title, detail, item.quantity, DB.formatMoney(meta.value), item.note || ''];
+  }
+
+  function appendExportGridRows(rows, items, productMap, type, sortState) {
+    const cellMap = new Map();
+    items.forEach((item) => {
+      const meta = getReportItemMeta(item, productMap, type);
+      const key = meta.cat + '|' + meta.pres;
+      if (!cellMap.has(key)) {
+        cellMap.set(key, { cat: meta.cat, pres: meta.pres, qty: 0, value: 0 });
+      }
+      const cell = cellMap.get(key);
+      cell.qty += meta.qty;
+      cell.value += meta.value;
+    });
+
+    const cats = [...new Set([...cellMap.values()].map((c) => c.cat))].sort(compareEs);
+    const pres = [...new Set([...cellMap.values()].map((c) => c.pres))].sort(compareEs);
+    const useValue = sortState.groupBy === 'value' || sortState.companion === 'value';
+
+    rows.push([''].concat(pres));
+    cats.forEach((cat) => {
+      const row = [cat];
+      pres.forEach((p) => {
+        const cell = cellMap.get(cat + '|' + p);
+        if (!cell) row.push('—');
+        else row.push(useValue ? DB.formatMoney(cell.value) : cell.qty);
+      });
+      rows.push(row);
+    });
+  }
+
+  function appendExportItemsSection(rows, title, items, productMap, type, sortState, options) {
+    rows.push([title]);
+    if (!items.length) {
+      rows.push(['(sin registros)']);
+      rows.push([]);
+      return { grupos: [] };
+    }
+
+    const jsonGroups = [];
+    const groupBy = sortState.groupBy;
+    const showGroupCol = groupBy !== 'value' && groupBy !== 'qty' && !isGridSortState(sortState);
+
+    if (isGridSortState(sortState)) {
+      appendExportGridRows(rows, items, productMap, type, sortState);
+      rows.push([]);
+      return { grupos: [{ nombre: 'Grilla', filas: [] }] };
+    }
+
+    let headers;
+    if (type === 'sale') {
+      headers = showGroupCol
+        ? ['Grupo', 'Producto', 'Detalle', 'Cantidad', 'P. unitario', 'Total']
+        : ['Producto', 'Detalle', 'Cantidad', 'P. unitario', 'Total'];
+      if (options.showMargin) headers.push('Utilidad');
+    } else if (type === 'in') {
+      headers = showGroupCol
+        ? ['Grupo', 'Producto', 'Detalle', 'Cantidad', 'P. compra', 'Total', 'Nota']
+        : ['Producto', 'Detalle', 'Cantidad', 'P. compra', 'Total', 'Nota'];
+    } else {
+      headers = showGroupCol
+        ? ['Grupo', 'Producto', 'Detalle', 'Cantidad', 'Valor ref.', 'Nota']
+        : ['Producto', 'Detalle', 'Cantidad', 'Valor ref.', 'Nota'];
+    }
+    rows.push(headers);
+
+    const groups = buildItemGroups(items, sortState, type, productMap, false);
+    groups.forEach((group) => {
+      const jsonRows = [];
+      group.items.forEach((item) => {
+        const row = buildItemExportRow(item, productMap, type, groupBy, {
+          groupKey: showGroupCol ? (group.key || '') : '',
+          showMargin: options.showMargin
+        });
+        if (!showGroupCol) row.shift();
+        rows.push(row);
+        jsonRows.push(row);
+      });
+      if (group.key || group.flat) {
+        jsonGroups.push({ nombre: group.key || '', filas: jsonRows });
+      }
+    });
+
+    if (options.totalRows) {
+      options.totalRows.forEach((t) => rows.push([t.label, t.value]));
+    }
+    rows.push([]);
+    return { grupos: jsonGroups };
+  }
+
+  function buildReportExportBundle() {
+    const s = reportSummary;
+    const dateStr = toDateInputValue(s.date);
+    const tabLabels = {
+      resumen: 'Resumen',
+      utilidad: 'Utilidad',
+      ventas: 'Ventas',
+      entradas: 'Entradas',
+      salidas: 'Salidas'
+    };
+    const tab = reportTab;
+    const rows = [];
+    const json = {
+      fecha: dateStr,
+      pestana: tabLabels[tab] || tab
+    };
+
+    if (tab === 'resumen') {
+      return {
+        baseName: 'reporte-resumen-' + dateStr,
+        rows: null,
+        json: null,
+        resumen: true,
+        summary: s
+      };
+    }
+
+    let sortState;
+    let items;
+    let type;
+    let sectionTitle;
+    let options = {};
+
+    if (tab === 'utilidad' || tab === 'ventas') {
+      sortState = reportSalesSortState;
+      items = s.sales.items;
+      type = 'sale';
+      sectionTitle = tab === 'utilidad' ? 'UTILIDAD — DETALLE DE VENTAS' : 'VENTAS';
+      options.showMargin = true;
+      options.totalRows = [
+        { label: 'Total ventas', value: DB.formatMoney(s.sales.totalMoney) },
+        { label: 'Utilidad', value: DB.formatMoney(s.margin.total) }
+      ];
+    } else if (tab === 'entradas') {
+      sortState = reportEntriesSortState;
+      items = s.entries.items;
+      type = 'in';
+      sectionTitle = 'ENTRADAS';
+      options.totalRows = [
+        { label: 'Total unidades', value: s.entries.totalUnits },
+        { label: 'Total compra', value: DB.formatMoney(s.entries.totalMoney || 0) }
+      ];
+    } else {
+      sortState = reportExitsSortState;
+      items = s.exits.items;
+      type = 'out';
+      sectionTitle = 'SALIDAS';
+      options.totalRows = [
+        { label: 'Total unidades', value: s.exits.totalUnits }
+      ];
+    }
+
+    rows.push(['REPORTE DEL DÍA', dateStr]);
+    rows.push(['Pestaña', tabLabels[tab]]);
+    rows.push(['Agrupación', groupModeExportLabel(sortState)]);
+    rows.push(['Orden', sortState.dir === 'asc' ? 'Ascendente' : 'Descendente']);
+    rows.push([]);
+
+    const section = appendExportItemsSection(rows, sectionTitle, items, s.productMap, type, sortState, options);
+
+    if (tab === 'utilidad' && s.margin) {
+      rows.push(['UTILIDAD POR PRODUCTO']);
+      rows.push(['Categoría', 'Presentación', 'Unidades', 'Ingresos', 'Costo', 'Utilidad']);
+      Object.keys(s.margin.grouped).sort((a, b) => a.localeCompare(b, 'es')).forEach((cat) => {
+        const presentations = s.margin.grouped[cat];
+        Object.keys(presentations).sort((a, b) => a.localeCompare(b, 'es')).forEach((presName) => {
+          const data = presentations[presName];
+          rows.push([
+            cat,
+            presName,
+            data.units,
+            DB.formatMoney(data.revenue),
+            DB.formatMoney(data.cost),
+            DB.formatMoney(data.margin)
+          ]);
+        });
+      });
+      rows.push(['', '', '', '', 'Utilidad total', DB.formatMoney(s.margin.total)]);
+      rows.push([]);
+    }
+
+    json.agrupacion = groupModeExportLabel(sortState);
+    json.orden = sortState.dir === 'asc' ? 'ascendente' : 'descendente';
+    json.grupos = section.grupos;
+    if (options.totalRows) {
+      json.totales = options.totalRows.reduce((acc, row) => {
+        acc[row.label] = row.value;
+        return acc;
+      }, {});
+    }
+
+    return {
+      baseName: 'reporte-' + tab + '-' + dateStr,
+      rows,
+      json,
+      resumen: false
+    };
+  }
+
+  function hideAppSplash() {
+    const splash = $('#app-splash');
+    if (!splash || splash.classList.contains('is-hidden')) return;
+    splash.classList.add('is-hidden');
+    splash.setAttribute('aria-hidden', 'true');
+    window.setTimeout(() => splash.remove(), 400);
+  }
+
   function renderReportDateBar() {
     const todayCls = isReportToday() ? ' disabled' : '';
     return (
@@ -1849,7 +2112,7 @@ const App = (function () {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('ventas-theme', theme);
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', theme === 'dark' ? '#0a0e14' : '#b8e6dc');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#05080c' : '#d4e0de');
     const btn = $('#theme-toggle');
     if (btn) {
       btn.innerHTML = theme === 'dark' ? Icons.sun() : Icons.moon();
@@ -1858,7 +2121,7 @@ const App = (function () {
   }
 
   function setupTheme() {
-    const saved = localStorage.getItem('ventas-theme') || 'light';
+    const saved = localStorage.getItem('ventas-theme') || 'dark';
     applyTheme(saved);
     $('#theme-toggle').addEventListener('click', () => {
       const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
@@ -2214,6 +2477,49 @@ const App = (function () {
     return presName + ' · ' + formatGridUnits(totals.qty) + ' · ' + DB.formatMoney(totals.value);
   }
 
+  function computeBulkMovementTotal(type) {
+    let qty = 0;
+    let value = 0;
+    if (!inventoryCatalogData) return { qty, value };
+
+    Object.keys(bulkMovementPresState).forEach((presId) => {
+      const totals = computeBulkPresTotals(
+        presId,
+        bulkMovementPresState[presId] || { allCategories: false, rows: [] },
+        inventoryCatalogData,
+        type
+      );
+      qty += totals.qty;
+      value += totals.value;
+    });
+    return { qty, value };
+  }
+
+  function computeSingleMovementTotal() {
+    const qty = parseFloat($('#mov-quantity')?.value) || 0;
+    const price = parseFloat($('#mov-unit-price')?.value) || 0;
+    return { qty, value: qty * price };
+  }
+
+  function formatMovementRegisterButtonText(totals) {
+    if (!totals.qty || totals.qty <= 0) return 'Registrar';
+    return 'Registrar · ' + formatGridUnits(totals.qty) + ' · ' + DB.formatMoney(totals.value);
+  }
+
+  function updateMovementRegisterButtons() {
+    const bulkBtn = $('#inv-bulk-register');
+    if (bulkBtn) {
+      bulkBtn.textContent = formatMovementRegisterButtonText(
+        computeBulkMovementTotal(movementEntryType)
+      );
+    }
+
+    const singleBtn = $('#mov-register');
+    if (singleBtn) {
+      singleBtn.textContent = formatMovementRegisterButtonText(computeSingleMovementTotal());
+    }
+  }
+
   function patchInvPresHeader(presId) {
     const card = document.querySelector('.inv-pres-accordion[data-pres-id="' + presId + '"]');
     if (!card || !inventoryCatalogData) return;
@@ -2336,6 +2642,8 @@ const App = (function () {
       const prod = inventoryCatalogData.catalog.find((p) => p.id === movProduct.value);
       movUnitPrice.value = getMovementUnitPrice(prod, movementEntryType);
     }
+
+    updateMovementRegisterButtons();
   }
 
   function renderInvPresBulkCard(pres, state, data, stockMap, categories) {
@@ -2788,9 +3096,9 @@ const App = (function () {
         <div class="card-title">Respaldo completo</div>
         <p class="field-hint">Guarda o restaura catálogo, ventas y movimientos. El archivo JSON se puede enviar por WhatsApp, Gmail u otra app.</p>
         <div class="backup-buttons">
-          <button type="button" class="btn btn-secondary" data-export="backup">Descargar JSON</button>
-          <button type="button" class="btn btn-secondary" data-export="share-backup">Compartir</button>
-          <button type="button" class="btn btn-secondary" id="btn-import-backup">Importar JSON</button>
+          <button type="button" class="btn btn-secondary btn--stack-icon" data-export="backup">${Icons.download()}<span>Descargar</span></button>
+          <button type="button" class="btn btn-secondary btn--stack-icon" data-export="share-backup">${Icons.share()}<span>Compartir</span></button>
+          <button type="button" class="btn btn-secondary btn--stack-icon" id="btn-import-backup">${Icons.upload()}<span>Importar</span></button>
         </div>
         <input type="file" id="backup-file-input" accept=".json,application/json" hidden>
       </div>
@@ -3448,6 +3756,7 @@ const App = (function () {
         if (!card) return;
         syncBulkMovementFromDOM();
         patchInvPresHeader(card.dataset.presId);
+        updateMovementRegisterButtons();
       });
     }
 
@@ -3496,6 +3805,7 @@ const App = (function () {
         }
         patchInvPresGrid(presId);
         patchInvPresHeader(presId);
+        updateMovementRegisterButtons();
       });
     });
 
@@ -3540,8 +3850,14 @@ const App = (function () {
 
     if (movProduct) {
       updateSingleMovUnitPrice();
-      movProduct.addEventListener('change', updateSingleMovUnitPrice);
+      movProduct.addEventListener('change', () => {
+        updateSingleMovUnitPrice();
+        updateMovementRegisterButtons();
+      });
     }
+
+    $('#mov-quantity')?.addEventListener('input', updateMovementRegisterButtons);
+    $('#mov-unit-price')?.addEventListener('input', updateMovementRegisterButtons);
 
     document.querySelectorAll('[data-mov-entry-type]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -3577,6 +3893,8 @@ const App = (function () {
         })
         .catch((err) => notifyError(err.message || 'Error al registrar movimiento'));
     });
+
+    updateMovementRegisterButtons();
   }
 
   // --- Event binding ---
@@ -3717,9 +4035,10 @@ const App = (function () {
           showToast('Cargando reporte...');
           return;
         }
-        if (type === 'csv') Export.exportDailyCsv(reportSummary);
-        else if (type === 'excel') Export.exportDailyExcel(reportSummary);
-        else if (type === 'json') Export.exportDailyJson(reportSummary);
+        const bundle = buildReportExportBundle();
+        if (type === 'csv') Export.exportReportCsv(bundle);
+        else if (type === 'excel') Export.exportReportExcel(bundle);
+        else if (type === 'json') Export.exportReportJson(bundle);
 
         showToast('Reporte exportado');
       });
@@ -4052,7 +4371,9 @@ const App = (function () {
     DB.open()
       .then(() => refreshAllSummaries())
       .then(() => render())
+      .then(() => hideAppSplash())
       .catch((err) => {
+        hideAppSplash();
         showToast('Error de base de datos: ' + (err.message || 'desconocido'));
         $('#main-content').innerHTML =
           '<div class="empty-state"><p>Error al iniciar la base de datos.</p>' +

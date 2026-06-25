@@ -11,6 +11,15 @@ const Icons = (function () {
     );
   }
 
+  function svgFilled(pathD, extraClass) {
+    const cls = extraClass ? 'ui-icon ' + extraClass : 'ui-icon';
+    return (
+      '<svg class="' + cls + '" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">' +
+      '<path d="' + pathD + '"/>' +
+      '</svg>'
+    );
+  }
+
   const icons = {
     home: () => svg('<path d="M4 10.5 12 3l8 7.5V19a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1v-8.5Z"/>'),
     sale: () => svg('<path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/>'),
@@ -33,7 +42,13 @@ const Icons = (function () {
     arrowIn: () => svg('<path d="M12 5v14M5 12l7 7 7-7"/>', 'ui-icon--sm'),
     arrowOut: () => svg('<path d="M12 19V5M5 12l7-7 7 7"/>', 'ui-icon--sm'),
     check: () => svg('<path d="m5 12 4 4L19 6"/>', 'ui-icon--sm'),
-    alert: () => svg('<path d="M12 8v4M12 16h.01"/><path d="M10.3 3.6 1.8 18a1 1 0 0 0 .9 1.5h18.6a1 1 0 0 0 .9-1.5L13.7 3.6a1 1 0 0 0-1.8 0Z"/>', 'ui-icon--sm')
+    alert: () => svg('<path d="M12 8v4M12 16h.01"/><path d="M10.3 3.6 1.8 18a1 1 0 0 0 .9 1.5h18.6a1 1 0 0 0 .9-1.5L13.7 3.6a1 1 0 0 0-1.8 0Z"/>', 'ui-icon--sm'),
+    download: () => svg('<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/>', 'ui-icon--sm'),
+    share: () => svgFilled(
+      'M6 19.5C6 11 10.5 7.5 15.5 7.5H18.2L22.2 11L18.2 14.5H15.5C10.5 14.5 7.8 16.5 6 19.5Z',
+      'ui-icon--sm ui-icon--filled'
+    ),
+    upload: () => svg('<path d="M12 21V9M7 14l5-5 5 5"/><path d="M5 21h14"/>', 'ui-icon--sm')
   };
 
   function mount(root) {

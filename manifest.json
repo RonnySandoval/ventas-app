@@ -9,15 +9,15 @@
   "scope": "./",
   "display": "standalone",
   "display_override": ["standalone", "minimal-ui"],
-  "background_color": "#4A4A4A",
-  "theme_color": "#2F5F58",
+  "background_color": "#05080c",
+  "theme_color": "#05080c",
   "orientation": "portrait-primary",
   "categories": ["business", "finance", "productivity"],
   "icons": [
     {
-      "src": "./icons/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "./icons/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any"
     },
     {
