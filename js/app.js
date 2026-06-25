@@ -1,6 +1,7 @@
 const App = (function () {
   let currentView = 'inicio';
   let catalogTab = 'productos';
+  let catalogProductView = 'matrix';
   let inventoryTab = 'movimiento';
   let reportTab = 'resumen';
   let dailySummary = null;
@@ -11,12 +12,14 @@ const App = (function () {
     return d;
   })();
   let openCatalogAccordions = new Set();
+  let openResumenAccordions = new Set();
   let openInvPresAccordions = new Set();
   let saleMode = 'unica';
   let saleCatalogData = null;
   let singleSaleSelection = { categoryId: null, presentationId: null };
   let singleSaleDraft = { qty: '1', price: null };
   let singleSaleProductId = null;
+  let singleSaleLastSelKey = '';
   let multiSaleRows = [];
   let multiSaleReviewOpen = false;
   let inventoryMode = 'masa';
@@ -26,10 +29,18 @@ const App = (function () {
   let inventoryStockMap = null;
   let inventoryCategories = null;
   let saleStockMap = null;
-  let stockSortState = { groupBy: 'cat', dir: 'asc' };
-  let reportSalesSortState = { groupBy: 'time', dir: 'desc' };
-  let reportEntriesSortState = { groupBy: 'time', dir: 'desc' };
-  let reportExitsSortState = { groupBy: 'time', dir: 'desc' };
+  let stockSortState = { groupBy: 'cat', companion: null, dir: 'asc' };
+  let reportSalesSortState = { groupBy: 'time', companion: null, dir: 'desc' };
+  let reportEntriesSortState = { groupBy: 'time', companion: null, dir: 'desc' };
+  let reportExitsSortState = { groupBy: 'time', companion: null, dir: 'desc' };
+  let openListGroups = new Set();
+  let reportChartMetric = {};
+  let reportChartGridAxis = {};
+  let reportChartRange = {};
+  let reportChartBucket = {};
+  let reportChartRangeData = {};
+  let chartBarDataStore = {};
+  let chartBarDataSeq = 0;
 
   const GROUP_MODES = [
     { id: 'cat', label: 'Categoría' },
@@ -285,7 +296,7 @@ const App = (function () {
       });
     };
 
-    $('#modal').classList.remove('hidden');
+    UI.openModal($('#modal'));
   }
 
   function setView(view) {
@@ -331,6 +342,113 @@ const App = (function () {
     return 'asc';
   }
 
+  function isGridSortState(state) {
+    return (state.groupBy === 'cat' && state.companion === 'pres') ||
+      (state.groupBy === 'pres' && state.companion === 'cat');
+  }
+
+  function isGroupModeActive(state, mode) {
+    if (mode === 'cat' || mode === 'pres') {
+      return state.groupBy === mode || isGridSortState(state);
+    }
+    return state.groupBy === mode && !isGridSortState(state);
+  }
+
+  function handleGroupModeClick(state, mode) {
+    if (mode === 'time' || mode === 'value' || mode === 'qty') {
+      state.groupBy = mode;
+      state.companion = null;
+      state.dir = defaultDirForGroupMode(mode);
+      return;
+    }
+    if (isGridSortState(state)) {
+      state.groupBy = mode;
+      state.companion = null;
+      state.dir = defaultDirForGroupMode(mode);
+      return;
+    }
+    const other = mode === 'cat' ? 'pres' : 'cat';
+    if (state.groupBy === other && !state.companion) {
+      state.companion = mode;
+      return;
+    }
+    state.groupBy = mode;
+    state.companion = null;
+    state.dir = defaultDirForGroupMode(mode);
+  }
+
+  function formatCompactMoney(amount) {
+    const n = Math.round(parseFloat(amount) || 0);
+    if (n >= 1000000) {
+      const m = n / 1000000;
+      return (m % 1 === 0 ? String(m) : m.toFixed(1).replace('.', ',')) + 'M';
+    }
+    if (n >= 1000) {
+      const k = n / 1000;
+      return (k % 1 === 0 ? String(k) : k.toFixed(1).replace('.', ',')) + 'k';
+    }
+    return String(n);
+  }
+
+  function formatGridUnits(qty) {
+    const n = parseFloat(qty) || 0;
+    return (Number.isInteger(n) ? String(n) : String(n)) + ' unid';
+  }
+
+  function matrixMoneyHtml(amount, prefix) {
+    const n = Math.round(parseFloat(amount) || 0);
+    const p = prefix || '';
+    const display = n >= 1000 ? formatCompactMoney(n) : String(n);
+    return (
+      '<span class="matrix-money" data-matrix-money="' + n + '" data-matrix-prefix="' + escapeHtml(p) + '"' +
+      ' title="' + escapeHtml(DB.formatMoney(n)) + '">' + escapeHtml(p + display) + '</span>'
+    );
+  }
+
+  function bindMatrixCellFormat() {
+    document.querySelectorAll('.matrix-scroll').forEach((wrap) => {
+      const table = wrap.querySelector('.cat-pres-matrix');
+      if (!table) return;
+      const overflows = table.scrollWidth > wrap.clientWidth + 2;
+      wrap.querySelectorAll('[data-matrix-money]').forEach((el) => {
+        const amount = parseFloat(el.dataset.matrixMoney) || 0;
+        const prefix = el.dataset.matrixPrefix || '';
+        const useCompact = overflows || amount >= 1000;
+        el.textContent = prefix + (useCompact ? formatCompactMoney(amount) : String(amount));
+        el.setAttribute('title', DB.formatMoney(amount));
+      });
+    });
+  }
+
+  function parseCompactMoney(str) {
+    if (str == null || str === '') return 0;
+    let s = String(str).trim().toLowerCase().replace(/\$/g, '').replace(/\s/g, '');
+    if (s.endsWith('k')) return (parseFloat(s.slice(0, -1).replace(',', '.')) || 0) * 1000;
+    if (s.endsWith('m')) return (parseFloat(s.slice(0, -1).replace(',', '.')) || 0) * 1000000;
+    s = s.replace(/\./g, '').replace(',', '.');
+    return parseFloat(s) || 0;
+  }
+
+  function groupAccordionId(contextKey, groupKey) {
+    return contextKey + '::' + String(groupKey);
+  }
+
+  function computeGroupTotals(items, isStock, type, productMap) {
+    let qty = 0;
+    let value = 0;
+    items.forEach((item) => {
+      if (isStock) {
+        qty += item.stock;
+        value += item.stock * item.standardPrice;
+      } else {
+        const meta = getReportItemMeta(item, productMap, type);
+        qty += meta.qty;
+        value += meta.value;
+      }
+    });
+    return { qty, value };
+  }
+
   function getSortStateRef(context) {
     if (context === 'stock') return stockSortState;
     if (context === 'report-sales') return reportSalesSortState;
@@ -341,7 +459,7 @@ const App = (function () {
 
   function renderGroupToolbar(state, contextKey) {
     const modes = GROUP_MODES.map((mode) =>
-      '<button type="button" class="group-mode-btn' + (state.groupBy === mode.id ? ' active' : '') +
+      '<button type="button" class="group-mode-btn' + (isGroupModeActive(state, mode.id) ? ' active' : '') +
       '" data-group-mode="' + mode.id + '">' + escapeHtml(mode.label) + '</button>'
     ).join('');
     const dirLabel = state.dir === 'asc' ? 'Orden ascendente' : 'Orden descendente';
@@ -420,39 +538,137 @@ const App = (function () {
     return keys.map((key) => ({ key, items: groups.get(key) }));
   }
 
-  function renderGroupCards(groups, renderItem) {
+  function renderGroupAccordions(groups, renderItem, contextKey, sortState, isStock, type, productMap) {
     if (!groups.length) return '';
     const hasItems = groups.some((g) => g.items.length);
     if (!hasItems) return '';
+
+    const collapsible = groups.filter((g) => !g.flat);
+    if (!openListGroups.size && collapsible.length) {
+      openListGroups.add(groupAccordionId(contextKey, collapsible[0].key));
+    }
 
     return groups.map((group) => {
       if (group.flat) {
         return '<div class="group-card group-card--flat"><div class="group-card-body">' +
           group.items.map(renderItem).join('') + '</div></div>';
       }
+
+      const accId = groupAccordionId(contextKey, group.key);
+      const isOpen = openListGroups.has(accId);
+      const totals = computeGroupTotals(group.items, isStock, type, productMap);
+      const metaStr = sortState.groupBy === 'value'
+        ? DB.formatMoney(totals.value) + ' · ' + formatGridUnits(totals.qty)
+        : formatGridUnits(totals.qty) + ' · ' + DB.formatMoney(totals.value);
+
       return (
-        '<div class="group-card">' +
-          '<div class="group-card-title">' + escapeHtml(group.key) + '</div>' +
-          '<div class="group-card-body">' + group.items.map(renderItem).join('') + '</div>' +
+        '<div class="accordion group-accordion">' +
+          '<button type="button" class="accordion-header' + (isOpen ? ' open' : '') +
+          '" data-list-group-toggle="' + escapeHtml(accId) + '" aria-expanded="' + isOpen + '">' +
+            '<span class="accordion-title">' + escapeHtml(group.key) + '</span>' +
+            '<span class="accordion-meta">' + escapeHtml(metaStr) + '</span>' +
+            '<span class="accordion-chevron">' + Icons.chevron(isOpen) + '</span>' +
+          '</button>' +
+          '<div class="accordion-body"><div class="accordion-body-inner">' +
+            group.items.map(renderItem).join('') +
+          '</div></div>' +
         '</div>'
       );
     }).join('');
   }
 
-  function renderStockListItem(item, groupBy) {
+  function renderStockGrid(items, sortState) {
+    const cats = [...new Set(items.map((i) => i.categoryName))].sort(compareEs);
+    const pres = [...new Set(items.map((i) => i.presentationName))].sort(compareEs);
+    const lookup = {};
+    items.forEach((item) => {
+      lookup[item.categoryName + '|' + item.presentationName] = item;
+    });
+
+    let html = '<div class="matrix-scroll matrix-scroll--sticky-row"><table class="cat-pres-matrix"><thead><tr><th></th>';
+    pres.forEach((p) => { html += '<th>' + escapeHtml(p) + '</th>'; });
+    html += '</tr></thead><tbody>';
+    cats.forEach((cat) => {
+      html += '<tr><th scope="row">' + escapeHtml(cat) + '</th>';
+      pres.forEach((p) => {
+        const item = lookup[cat + '|' + p];
+        if (item) {
+          const cls = item.stock <= 0 ? 'matrix-cell--low' : '';
+          const cellContent = sortState.groupBy === 'value'
+            ? matrixMoneyHtml(item.stock * item.standardPrice, '')
+            : escapeHtml(formatGridUnits(item.stock));
+          html += '<td class="matrix-cell ' + cls + '">' + cellContent + '</td>';
+        } else {
+          html += '<td class="matrix-cell matrix-cell--empty">—</td>';
+        }
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  function renderReportGrid(items, productMap, type, sortState) {
+    const cellMap = new Map();
+    items.forEach((item) => {
+      const meta = getReportItemMeta(item, productMap, type);
+      const key = meta.cat + '|' + meta.pres;
+      if (!cellMap.has(key)) {
+        cellMap.set(key, { cat: meta.cat, pres: meta.pres, qty: 0, value: 0 });
+      }
+      const cell = cellMap.get(key);
+      cell.qty += meta.qty;
+      cell.value += meta.value;
+    });
+
+    const cats = [...new Set([...cellMap.values()].map((c) => c.cat))].sort(compareEs);
+    const pres = [...new Set([...cellMap.values()].map((c) => c.pres))].sort(compareEs);
+
+    let html = '<div class="matrix-scroll matrix-scroll--sticky-row"><table class="cat-pres-matrix"><thead><tr><th></th>';
+    pres.forEach((p) => { html += '<th>' + escapeHtml(p) + '</th>'; });
+    html += '</tr></thead><tbody>';
+    cats.forEach((cat) => {
+      html += '<tr><th scope="row">' + escapeHtml(cat) + '</th>';
+      pres.forEach((p) => {
+        const cell = cellMap.get(cat + '|' + p);
+        if (cell) {
+          const cellContent = sortState.groupBy === 'value'
+            ? matrixMoneyHtml(cell.value, '')
+            : escapeHtml(formatGridUnits(cell.qty));
+          html += '<td class="matrix-cell">' + cellContent + '</td>';
+        } else {
+          html += '<td class="matrix-cell matrix-cell--empty">—</td>';
+        }
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  function renderStockListItem(item, sortState) {
+    const groupBy = sortState.groupBy;
+    const isValueMode = groupBy === 'value';
     const cls = item.stock <= 0 ? 'stock-low' : 'stock-ok';
     const totalValue = item.stock * item.standardPrice;
-    const subParts = [];
-    if (groupBy !== 'cat') subParts.push(escapeHtml(item.categoryName));
-    if (groupBy !== 'pres') subParts.push(escapeHtml(item.presentationName));
-    subParts.push('Venta ' + DB.formatMoney(item.standardPrice));
-    subParts.push('Compra ' + DB.formatMoney(item.purchasePrice || 0));
-    subParts.push('Valor ' + DB.formatMoney(totalValue));
-    if (groupBy !== 'time') subParts.push('Últ. act. ' + formatActivityTime(item.lastActivityAt));
 
     let title = item.presentationName;
     if (groupBy === 'pres') title = item.categoryName;
     else if (groupBy === 'time') title = item.presentationName + ' · ' + item.categoryName;
+    else if (groupBy === 'value' || groupBy === 'qty') title = item.presentationName + ' · ' + item.categoryName;
+
+    const subParts = [
+      'Venta ' + DB.formatMoney(item.standardPrice),
+      'Compra ' + DB.formatMoney(item.purchasePrice || 0)
+    ];
+    if (groupBy !== 'time' && groupBy !== 'value' && groupBy !== 'qty') {
+      subParts.push('Últ. act. ' + formatActivityTime(item.lastActivityAt));
+    }
+
+    const primaryValue = isValueMode ? DB.formatMoney(totalValue) : formatGridUnits(item.stock);
+    const secondaryValue = isValueMode
+      ? formatGridUnits(item.stock)
+      : DB.formatMoney(totalValue);
 
     return (
       '<div class="list-item list-item--record">' +
@@ -461,16 +677,28 @@ const App = (function () {
           '<div class="list-item-sub">' + subParts.join(' · ') + '</div>' +
         '</div>' +
         '<div class="list-item-meta">' +
-          '<div class="list-item-value ' + cls + '">' + item.stock + ' uds</div>' +
+          '<div class="list-item-value ' + cls + '">' + escapeHtml(primaryValue) + '</div>' +
+          (isValueMode ? '<div class="list-item-extra">' + escapeHtml(secondaryValue) + '</div>' : '') +
         '</div>' +
       '</div>'
     );
   }
 
-  function renderStockList(items, sortState) {
+  function renderStockList(items, sortState, contextKey) {
     if (!items.length) return emptyState('Sin existencias registradas');
+    if (isGridSortState(sortState)) {
+      return renderStockGrid(items, sortState);
+    }
     const groups = buildItemGroups(items, sortState, null, null, true);
-    return renderGroupCards(groups, (item) => renderStockListItem(item, sortState.groupBy));
+    return renderGroupAccordions(
+      groups,
+      (item) => renderStockListItem(item, sortState),
+      contextKey || 'stock',
+      sortState,
+      true,
+      null,
+      null
+    );
   }
 
   function getReportItemMeta(item, productMap, type) {
@@ -495,49 +723,50 @@ const App = (function () {
     const cat = prod ? prod.categoryName : '';
     const meta = getReportItemMeta(item, productMap, type);
     let title = presName;
-    let sub = '';
+    let detail = '';
 
     if (groupBy === 'cat') {
       title = presName;
-      sub = DB.formatTime(item.timestamp);
+      detail = DB.formatTime(item.timestamp);
     } else if (groupBy === 'pres') {
       title = cat;
-      sub = presName + ' · ' + DB.formatTime(item.timestamp);
+      detail = DB.formatTime(item.timestamp);
     } else if (groupBy === 'time') {
       title = presName;
-      sub = cat + ' · ' + DB.formatTime(item.timestamp);
+      detail = cat + ' · ' + DB.formatTime(item.timestamp);
     } else {
       title = presName;
-      sub = cat + ' · ' + DB.formatTime(item.timestamp);
+      detail = cat + ' · ' + DB.formatTime(item.timestamp);
     }
 
-    let valueHtml = '';
+    let qtyHtml = '';
+    let totalHtml = '';
     if (type === 'sale') {
       const margin = showMargin && prod
         ? (item.unitPrice - (prod.purchasePrice || 0)) * item.quantity
         : null;
-      valueHtml = '<div class="list-item-qty">' + item.quantity + ' × ' + DB.formatMoney(item.unitPrice) + '</div>';
-      valueHtml += '<div class="list-item-total">Total ' + DB.formatMoney(meta.value) + '</div>';
+      qtyHtml = item.quantity + ' × ' + DB.formatMoney(item.unitPrice);
+      totalHtml = DB.formatMoney(meta.value);
       if (margin !== null) {
-        valueHtml += '<div class="list-item-extra margin-inline">Util. ' + DB.formatMoney(margin) + '</div>';
+        totalHtml += '<div class="list-item-extra margin-inline">Util. ' + DB.formatMoney(margin) + '</div>';
       }
     } else if (type === 'in') {
-      valueHtml = '<div class="list-item-qty">' + item.quantity + ' uds';
-      if (item.purchasePrice) valueHtml += ' · ' + DB.formatMoney(item.purchasePrice) + '/ud';
-      valueHtml += '</div>';
-      valueHtml += '<div class="list-item-total">Total ' + DB.formatMoney(meta.value) + '</div>';
+      qtyHtml = formatGridUnits(item.quantity);
+      if (item.purchasePrice) qtyHtml += ' · ' + DB.formatMoney(item.purchasePrice) + '/unid';
+      totalHtml = DB.formatMoney(meta.value);
     } else {
-      valueHtml = '<div class="list-item-qty">' + item.quantity + ' uds</div>';
-      valueHtml += '<div class="list-item-total">Valor ' + DB.formatMoney(meta.value) + '</div>';
+      qtyHtml = formatGridUnits(item.quantity);
+      totalHtml = DB.formatMoney(meta.value);
     }
 
-    let html = '<div class="list-item list-item--record">';
-    html += '<div class="list-item-main">';
+    let html = '<div class="list-item list-item--record list-item--report">';
+    html += '<div class="list-item-col list-item-col--name">';
     html += '<div class="list-item-title">' + escapeHtml(title) + '</div>';
-    if (sub) html += '<div class="list-item-sub">' + escapeHtml(sub) + '</div>';
+    html += '<div class="list-item-sub">' + escapeHtml(detail) + '</div>';
     html += '</div>';
-    html += '<div class="list-item-meta">';
-    html += '<div class="list-item-value">' + valueHtml + '</div>';
+    html += '<div class="list-item-col list-item-col--qty">' + qtyHtml + '</div>';
+    html += '<div class="list-item-col list-item-col--total">';
+    html += '<div class="list-item-total">' + totalHtml + '</div>';
     if (editable) {
       html += '<div class="inline-actions">';
       if (type === 'sale') {
@@ -554,12 +783,17 @@ const App = (function () {
     return html;
   }
 
-  function renderRecentList(items, productMap, type, limit, editable, showMargin, sortState) {
+  function renderRecentList(items, productMap, type, limit, editable, showMargin, sortState, contextKey) {
     if (!items.length) {
       return emptyState('Sin registros');
     }
 
-    const state = sortState || { groupBy: 'time', dir: 'desc' };
+    const state = sortState || { groupBy: 'time', companion: null, dir: 'desc' };
+
+    if (isGridSortState(state)) {
+      return renderReportGrid(items, productMap, type, state);
+    }
+
     const groups = buildItemGroups(items, state, type, productMap, false);
     let flatItems = groups.flatMap((g) => g.items);
     if (limit) flatItems = flatItems.slice(0, limit);
@@ -570,13 +804,14 @@ const App = (function () {
       ).join('');
     }
 
-    const limitedGroups = groups.map((g) => ({
-      ...g,
-      items: g.items
-    }));
-
-    return renderGroupCards(limitedGroups, (item) =>
-      renderReportListItem(item, productMap, type, editable, showMargin, state.groupBy)
+    return renderGroupAccordions(
+      groups,
+      (item) => renderReportListItem(item, productMap, type, editable, showMargin, state.groupBy),
+      contextKey || 'report',
+      state,
+      false,
+      type,
+      productMap
     );
   }
 
@@ -593,7 +828,7 @@ const App = (function () {
         const data = presentations[presName];
         html += '<div class="list-item">';
         html += '<div class="list-item-main"><div class="list-item-title">' + escapeHtml(presName) + '</div>';
-        html += '<div class="list-item-sub">' + data.units + ' uds</div></div>';
+        html += '<div class="list-item-sub">' + formatGridUnits(data.units) + '</div></div>';
         if (showMoney) {
           html += '<div class="list-item-value">' + DB.formatMoney(data.value) + '</div>';
         }
@@ -601,6 +836,54 @@ const App = (function () {
       });
     });
     return html;
+  }
+
+  function renderGroupedListResumen(grouped, showMoney) {
+    if (!grouped || Object.keys(grouped).length === 0) {
+      return emptyState('Sin registros');
+    }
+
+    let html = '<div class="resumen-grouped">';
+    Object.keys(grouped).sort((a, b) => a.localeCompare(b, 'es')).forEach((cat) => {
+      html += '<div class="resumen-category-block">';
+      html += '<div class="group-header">' + escapeHtml(cat) + '</div>';
+      html += '<div class="resumen-detail-list">';
+      const presentations = grouped[cat];
+      Object.keys(presentations).sort((a, b) => a.localeCompare(b, 'es')).forEach((presName) => {
+        const data = presentations[presName];
+        html += '<div class="resumen-detail-row' + (showMoney ? '' : ' resumen-detail-row--no-money') + '">';
+        html += '<span class="resumen-detail-col resumen-detail-col--pres">' + escapeHtml(presName) + '</span>';
+        html += '<span class="resumen-detail-col resumen-detail-col--qty">' + formatGridUnits(data.units) + '</span>';
+        if (showMoney) {
+          html += '<span class="resumen-detail-col resumen-detail-col--value">' + DB.formatMoney(data.value) + '</span>';
+        }
+        html += '</div>';
+      });
+      html += '</div></div>';
+    });
+    html += '</div>';
+    return html;
+  }
+
+  function renderResumenAccordionCard(id, title, grouped, showMoney, totalUnits, totalMoney) {
+    const isOpen = openResumenAccordions.has(id);
+    const meta = showMoney
+      ? DB.formatMoney(totalMoney) + ' · ' + formatGridUnits(totalUnits)
+      : formatGridUnits(totalUnits);
+
+    return (
+      '<div class="accordion report-resumen-accordion">' +
+        '<button type="button" class="accordion-header' + (isOpen ? ' open' : '') +
+        '" data-resumen-accordion="' + id + '" aria-expanded="' + isOpen + '">' +
+          '<span class="accordion-title">' + escapeHtml(title) + '</span>' +
+          '<span class="accordion-meta">' + escapeHtml(meta) + '</span>' +
+          '<span class="accordion-chevron">' + Icons.chevron(isOpen) + '</span>' +
+        '</button>' +
+        '<div class="accordion-body"><div class="accordion-body-inner">' +
+          renderGroupedListResumen(grouped, showMoney) +
+        '</div></div>' +
+      '</div>'
+    );
   }
 
   function renderGroupedMarginList(grouped) {
@@ -617,7 +900,7 @@ const App = (function () {
         html += '<div class="list-item">';
         html += '<div class="list-item-main">';
         html += '<div class="list-item-title">' + escapeHtml(presName) + '</div>';
-        html += '<div class="list-item-sub">' + data.units + ' uds · Venta ' + DB.formatMoney(data.revenue) +
+        html += '<div class="list-item-sub">' + formatGridUnits(data.units) + ' · Venta ' + DB.formatMoney(data.revenue) +
           ' · Costo ' + DB.formatMoney(data.cost) + '</div>';
         html += '</div>';
         html += '<div class="list-item-value margin-value">' + DB.formatMoney(data.margin) + '</div>';
@@ -674,66 +957,899 @@ const App = (function () {
       .replace(/"/g, '&quot;');
   }
 
-  function renderCatalogAccordion(catalog) {
+  function renderCatalogMatrix(catalog, categories, presentations) {
     if (!catalog.length) {
       return emptyState('Sin productos en el catálogo', 'catalog');
     }
 
-    const grouped = {};
-    catalog.forEach((item) => {
-      if (!grouped[item.categoryId]) {
-        grouped[item.categoryId] = { name: item.categoryName, items: [] };
-      }
-      grouped[item.categoryId].items.push(item);
+    const catIds = new Set(catalog.map((p) => p.categoryId));
+    const presIds = new Set(catalog.map((p) => p.presentationId));
+    const cats = categories.filter((c) => catIds.has(c.id)).sort((a, b) => compareEs(a.name, b.name));
+    const pres = presentations.filter((p) => presIds.has(p.id)).sort((a, b) => compareEs(a.name, b.name));
+    const lookup = {};
+    catalog.forEach((p) => {
+      lookup[p.categoryId + '|' + p.presentationId] = p;
     });
 
-    const categoryIds = Object.keys(grouped).sort((a, b) =>
-      grouped[a].name.localeCompare(grouped[b].name, 'es')
-    );
+    let html = '<div class="matrix-scroll matrix-scroll--sticky-row"><table class="cat-pres-matrix cat-pres-matrix--catalog"><thead><tr><th></th>';
+    pres.forEach((p) => { html += '<th>' + escapeHtml(p.name) + '</th>'; });
+    html += '</tr></thead><tbody>';
 
-    if (!openCatalogAccordions.size && categoryIds.length) {
-      openCatalogAccordions.add(categoryIds[0]);
+    cats.forEach((cat) => {
+      html += '<tr><th scope="row">' + escapeHtml(cat.name) + '</th>';
+      pres.forEach((p) => {
+        const item = lookup[cat.id + '|' + p.id];
+        if (item) {
+          html += '<td class="matrix-cell matrix-cell--catalog">' +
+            '<div class="matrix-cell-prices">' + matrixMoneyHtml(item.standardPrice, 'V ') + '</div>' +
+            '<div class="matrix-cell-prices matrix-cell-prices--muted">' + matrixMoneyHtml(item.purchasePrice || 0, 'C ') + '</div>' +
+            '<div class="matrix-cell-actions">' +
+              editBtn('data-edit-prod="' + item.id + '"', 'Editar producto') +
+              delBtn('data-del-prod="' + item.id + '"', 'Eliminar producto') +
+            '</div></td>';
+        } else {
+          html += '<td class="matrix-cell matrix-cell--empty">—</td>';
+        }
+      });
+      html += '</tr>';
+    });
+
+    html += '</tbody></table></div>';
+    return html;
+  }
+
+  function renderCatalogProductRow(item, titleLabel) {
+    return (
+      '<div class="list-item">' +
+        '<div class="list-item-main">' +
+          '<div class="list-item-title">' + escapeHtml(titleLabel) + '</div>' +
+          '<div class="list-item-sub">Venta: ' + DB.formatMoney(item.standardPrice) +
+          ' · Compra: ' + DB.formatMoney(item.purchasePrice || 0) + '</div>' +
+        '</div>' +
+        '<div class="inline-actions">' +
+          editBtn('data-edit-prod="' + item.id + '"', 'Editar producto') +
+          delBtn('data-del-prod="' + item.id + '"', 'Eliminar producto') +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  function renderCatalogCards(catalog, groupBy) {
+    if (!catalog.length) {
+      return emptyState('Sin productos en el catálogo', 'catalog');
     }
 
-    return categoryIds.map((catId) => {
-      const group = grouped[catId];
-      const isOpen = openCatalogAccordions.has(catId);
+    const isCat = groupBy === 'cat';
+    const groupKey = isCat ? 'categoryId' : 'presentationId';
+    const groupLabel = isCat ? 'categoryName' : 'presentationName';
+    const itemLabel = isCat ? 'presentationName' : 'categoryName';
+    const idPrefix = isCat ? 'cat' : 'pres';
 
-      const itemsHtml = group.items.map((item) => `
-        <div class="list-item">
-          <div class="list-item-main">
-            <div class="list-item-title">${escapeHtml(item.presentationName)}</div>
-            <div class="list-item-sub">Venta: ${DB.formatMoney(item.standardPrice)} · Compra: ${DB.formatMoney(item.purchasePrice || 0)}</div>
-          </div>
-          <div class="inline-actions">
-            ${editBtn('data-edit-prod="' + item.id + '"', 'Editar producto')}
-            <button type="button" class="btn btn-danger btn-sm" data-del-prod="${item.id}">Eliminar</button>
-          </div>
-        </div>
-      `).join('');
+    const grouped = {};
+    catalog.forEach((item) => {
+      if (!grouped[item[groupKey]]) {
+        grouped[item[groupKey]] = { name: item[groupLabel], items: [] };
+      }
+      grouped[item[groupKey]].items.push(item);
+    });
 
-      return `
-        <div class="accordion">
-          <button type="button" class="accordion-header ${isOpen ? 'open' : ''}" data-accordion-toggle="${catId}" aria-expanded="${isOpen}">
-            <span class="accordion-title">${escapeHtml(group.name)}</span>
-            <span class="accordion-meta">${group.items.length} prod.</span>
-            <span class="accordion-chevron">${Icons.chevron(isOpen)}</span>
-          </button>
-          <div class="accordion-body">
-            <div class="accordion-body-inner">
-            ${itemsHtml}
-            </div>
-          </div>
-        </div>
-      `;
+    const keys = Object.keys(grouped).sort((a, b) => compareEs(grouped[a].name, grouped[b].name));
+    const prefix = idPrefix + '::';
+    const hasOpenForView = [...openCatalogAccordions].some((id) => id.startsWith(prefix));
+    if (!hasOpenForView && keys.length) {
+      openCatalogAccordions.add(idPrefix + '::' + keys[0]);
+    }
+
+    return keys.map((key) => {
+      const group = grouped[key];
+      const accId = idPrefix + '::' + key;
+      const isOpen = openCatalogAccordions.has(accId);
+      group.items.sort((a, b) => compareEs(a[itemLabel], b[itemLabel]));
+
+      const itemsHtml = group.items
+        .map((item) => renderCatalogProductRow(item, item[itemLabel]))
+        .join('');
+
+      return (
+        '<div class="accordion catalog-accordion">' +
+          '<button type="button" class="accordion-header' + (isOpen ? ' open' : '') +
+          '" data-accordion-toggle="' + accId + '" aria-expanded="' + isOpen + '">' +
+            '<span class="accordion-title">' + escapeHtml(group.name) + '</span>' +
+            '<span class="accordion-meta">' + group.items.length + ' prod.</span>' +
+            '<span class="accordion-chevron">' + Icons.chevron(isOpen) + '</span>' +
+          '</button>' +
+          '<div class="accordion-body"><div class="accordion-body-inner">' + itemsHtml + '</div></div>' +
+        '</div>'
+      );
     }).join('');
+  }
+
+  function renderCatalogProductView(catalog, categories, presentations, view) {
+    if (view === 'cat') return renderCatalogCards(catalog, 'cat');
+    if (view === 'pres') return renderCatalogCards(catalog, 'pres');
+    return renderCatalogMatrix(catalog, categories, presentations);
+  }
+
+  function renderCatalogViewToolbar() {
+    const modes = [
+      { id: 'matrix', label: 'Grilla' },
+      { id: 'cat', label: 'Por categoría' },
+      { id: 'pres', label: 'Por presentación' }
+    ];
+    const buttons = modes.map((mode) =>
+      '<button type="button" class="tab' + (catalogProductView === mode.id ? ' active' : '') +
+      '" data-catalog-view="' + mode.id + '">' + escapeHtml(mode.label) + '</button>'
+    ).join('');
+    return '<div class="tabs catalog-view-tabs">' + buttons + '</div>';
+  }
+
+  function catalogViewHint(view) {
+    if (view === 'cat') return 'Agrupado por categoría; cada fila muestra la presentación.';
+    if (view === 'pres') return 'Agrupado por presentación; cada fila muestra la categoría.';
+    return 'Tabla categoría × presentación con precios de venta y compra.';
+  }
+
+  function getDefaultChartRange() {
+    const to = new Date(reportDate);
+    to.setHours(0, 0, 0, 0);
+    const from = new Date(to);
+    from.setDate(from.getDate() - 6);
+    return { from, to };
+  }
+
+  function ensureChartRangeDefaults(contextKey) {
+    if (!reportChartRange[contextKey]) {
+      reportChartRange[contextKey] = getDefaultChartRange();
+    }
+    if (!reportChartBucket[contextKey]) {
+      reportChartBucket[contextKey] = 'day';
+    }
+  }
+
+  function getSortStateForReportTab(tab) {
+    if (tab === 'ventas' || tab === 'utilidad') return reportSalesSortState;
+    if (tab === 'entradas') return reportEntriesSortState;
+    if (tab === 'salidas') return reportExitsSortState;
+    return null;
+  }
+
+  function needsReportChartRange() {
+    if (currentView !== 'reportes' || reportTab === 'resumen') return false;
+    const state = getSortStateForReportTab(reportTab);
+    return state?.groupBy === 'time';
+  }
+
+  function invalidateReportChartRangeData(contextKey) {
+    if (contextKey) delete reportChartRangeData[contextKey];
+    else reportChartRangeData = {};
+  }
+
+  function refreshReportChartRangeForContext(contextKey) {
+    ensureChartRangeDefaults(contextKey);
+    const { from, to } = reportChartRange[contextKey];
+    return DB.getReportRangeData(from, to).then((data) => {
+      reportChartRangeData[contextKey] = { ...data, from, to };
+    });
+  }
+
+  function refreshActiveReportChartRange() {
+    if (!needsReportChartRange()) return Promise.resolve();
+    const contextKey = getReportChartContext(reportTab);
+    if (reportChartRangeData[contextKey]) return Promise.resolve();
+    return refreshReportChartRangeForContext(contextKey);
+  }
+
+  function chartBucketStart(ts, bucket) {
+    const d = new Date(DB.startOfDay(ts));
+    if (bucket === 'day') return d.getTime();
+    if (bucket === 'week') {
+      const dow = d.getDay();
+      d.setDate(d.getDate() + (dow === 0 ? -6 : 1 - dow));
+      return d.getTime();
+    }
+    d.setDate(1);
+    return d.getTime();
+  }
+
+  function advanceChartBucket(start, bucket) {
+    const d = new Date(start);
+    if (bucket === 'day') d.setDate(d.getDate() + 1);
+    else if (bucket === 'week') d.setDate(d.getDate() + 7);
+    else d.setMonth(d.getMonth() + 1);
+    return DB.startOfDay(d);
+  }
+
+  function listChartBucketStarts(from, to, bucket) {
+    const rangeEnd = DB.endOfDay(to);
+    let cur = chartBucketStart(DB.startOfDay(from), bucket);
+    const buckets = [];
+    while (cur <= rangeEnd) {
+      buckets.push(cur);
+      cur = advanceChartBucket(cur, bucket);
+    }
+    return buckets;
+  }
+
+  function formatChartBucketLabel(bucketStart, bucket) {
+    if (bucket === 'day') return formatGroupDate(bucketStart);
+    if (bucket === 'week') {
+      const start = new Date(bucketStart);
+      const end = new Date(bucketStart);
+      end.setDate(end.getDate() + 6);
+      const fmt = (d) => {
+        const day = String(d.getDate()).padStart(2, '0');
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        return day + '/' + m;
+      };
+      return fmt(start) + '–' + fmt(end);
+    }
+    const d = new Date(bucketStart);
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    return m + '/' + d.getFullYear();
+  }
+
+  function getReportChartRangeItems(tab, rangeData) {
+    if (!rangeData) return [];
+    if (tab === 'ventas' || tab === 'utilidad') return rangeData.sales;
+    if (tab === 'entradas') return rangeData.entries;
+    if (tab === 'salidas') return rangeData.exits;
+    return [];
+  }
+
+  function buildTimeBucketChartBars(tab, items, productMap, type, from, to, bucket, metric) {
+    const bucketStarts = listChartBucketStarts(from, to, bucket);
+    const bucketsMap = new Map();
+
+    bucketStarts.forEach((start) => {
+      bucketsMap.set(start, {
+        label: formatChartBucketLabel(start, bucket),
+        qty: 0,
+        value: 0,
+        margin: 0,
+        items: []
+      });
+    });
+
+    items.forEach((item) => {
+      const start = chartBucketStart(item.timestamp, bucket);
+      if (!bucketsMap.has(start)) return;
+      const row = bucketsMap.get(start);
+      const meta = getReportItemMeta(item, productMap, type);
+      row.qty += meta.qty;
+      row.value += meta.value;
+      if (tab === 'utilidad') {
+        row.margin += getItemChartValue(tab, item, productMap, type, 'margin');
+      }
+      row.items.push(item);
+    });
+
+    return bucketStarts.map((start) => {
+      const row = bucketsMap.get(start);
+      const displayValue = metric === 'qty' ? row.qty : (tab === 'utilidad' ? row.margin : row.value);
+      return {
+        label: shortenChartLabel(row.label, bucket === 'month' ? 12 : 14),
+        qty: row.qty,
+        value: row.value,
+        margin: row.margin,
+        displayValue,
+        details: aggregateItemsToDetails(row.items, tab, productMap, type, 'cat').slice(0, 10)
+      };
+    });
+  }
+
+  function renderChartRangeToolbar(contextKey, from, to) {
+    return (
+      '<div class="chart-toolbar chart-range-toolbar" data-chart-context="' + contextKey + '">' +
+        '<label class="chart-range-field">Desde' +
+          '<input type="date" class="chart-range-input" data-chart-from value="' + toDateInputValue(from) + '" aria-label="Desde">' +
+        '</label>' +
+        '<label class="chart-range-field">Hasta' +
+          '<input type="date" class="chart-range-input" data-chart-to value="' + toDateInputValue(to) + '" aria-label="Hasta">' +
+        '</label>' +
+      '</div>'
+    );
+  }
+
+  function renderChartBucketToolbar(contextKey, bucket) {
+    return (
+      '<div class="chart-toolbar tabs chart-bucket-tabs" data-chart-context="' + contextKey + '">' +
+        '<button type="button" class="tab' + (bucket === 'day' ? ' active' : '') + '" data-chart-bucket="day">Día</button>' +
+        '<button type="button" class="tab' + (bucket === 'week' ? ' active' : '') + '" data-chart-bucket="week">Semana</button>' +
+        '<button type="button" class="tab' + (bucket === 'month' ? ' active' : '') + '" data-chart-bucket="month">Mes</button>' +
+      '</div>'
+    );
+  }
+
+  function renderChartTimeToolbars(contextKey) {
+    ensureChartRangeDefaults(contextKey);
+    const { from, to } = reportChartRange[contextKey];
+    const bucket = reportChartBucket[contextKey];
+    return renderChartRangeToolbar(contextKey, from, to) +
+      renderChartBucketToolbar(contextKey, bucket);
+  }
+
+  function validateChartRange(from, to) {
+    const today = new Date();
+    today.setHours(23, 59, 59, 999);
+    const start = new Date(from);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(to);
+    end.setHours(0, 0, 0, 0);
+    if (start > end) return 'La fecha «desde» no puede ser posterior a «hasta»';
+    if (end > today) return 'No puedes elegir una fecha futura';
+    return null;
+  }
+
+  function applyChartRangeChange(contextKey, from, to) {
+    const err = validateChartRange(from, to);
+    if (err) {
+      showToast(err);
+      return Promise.resolve();
+    }
+    reportChartRange[contextKey] = { from, to };
+    invalidateReportChartRangeData(contextKey);
+    hideChartTooltip();
+    return refreshReportChartRangeForContext(contextKey).then(() => render());
+  }
+
+  function shortenChartLabel(label, maxLen) {
+    const str = String(label || '');
+    if (str.length <= (maxLen || 14)) return str;
+    return str.slice(0, (maxLen || 14) - 1) + '…';
+  }
+
+  function getReportChartContext(tab) {
+    if (tab === 'entradas') return 'report-entries';
+    if (tab === 'salidas') return 'report-exits';
+    if (tab === 'utilidad') return 'report-utilidad';
+    return 'report-sales';
+  }
+
+  function isChartGroupMode(sortState) {
+    return ['cat', 'pres', 'time'].includes(sortState.groupBy) && !isGridSortState(sortState);
+  }
+
+  function getChartMetric(tab, sortState, contextKey) {
+    if (sortState.groupBy === 'qty') return 'qty';
+    if (sortState.groupBy === 'value') return 'value';
+    if (isChartGroupMode(sortState) || isGridSortState(sortState)) {
+      return reportChartMetric[contextKey] || (tab === 'salidas' ? 'qty' : 'value');
+    }
+    return tab === 'salidas' ? 'qty' : 'value';
+  }
+
+  function getChartGridAxis(contextKey, sortState) {
+    if (!isGridSortState(sortState)) {
+      return sortState.groupBy === 'pres' ? 'pres' : 'cat';
+    }
+    return reportChartGridAxis[contextKey] || 'cat';
+  }
+
+  function getReportChartTitle(tab, sortState, contextKey) {
+    const tabLabels = {
+      ventas: 'Ventas',
+      entradas: 'Entradas',
+      salidas: 'Salidas',
+      utilidad: 'Utilidad'
+    };
+    const modeLabels = {
+      cat: 'categoría',
+      pres: 'presentación',
+      time: 'fecha',
+      value: 'valor',
+      qty: 'cantidad'
+    };
+    if (isGridSortState(sortState)) {
+      const axis = getChartGridAxis(contextKey, sortState);
+      return tabLabels[tab] + ' por ' + (axis === 'cat' ? 'categoría' : 'presentación');
+    }
+    return tabLabels[tab] + ' por ' + (modeLabels[sortState.groupBy] || 'grupo');
+  }
+
+  function getBarDisplayValue(bar, metric, tab) {
+    if (metric === 'qty') return bar.qty;
+    if (tab === 'utilidad') return bar.margin != null ? bar.margin : bar.value;
+    return bar.value;
+  }
+
+  function formatChartDisplayValue(value, metric) {
+    if (metric === 'qty') return formatGridUnits(value);
+    return DB.formatMoney(value);
+  }
+
+  function aggregateItemsToDetails(items, tab, productMap, type, detailField) {
+    const map = new Map();
+    items.forEach((item) => {
+      const prod = productMap[item.productId];
+      const meta = getReportItemMeta(item, productMap, type);
+      let key;
+      let label;
+      if (detailField === 'pres') {
+        key = prod?.presentationName || 'Sin presentación';
+        label = key;
+      } else if (detailField === 'cat') {
+        key = prod?.categoryName || 'Sin categoría';
+        label = key;
+      } else {
+        label = getItemChartLabel(item, productMap);
+        key = label;
+      }
+      if (!map.has(key)) map.set(key, { label, qty: 0, value: 0, margin: 0 });
+      const row = map.get(key);
+      row.qty += meta.qty;
+      row.value += meta.value;
+      row.margin += getItemChartValue(tab, item, productMap, type, 'margin');
+    });
+    return [...map.values()].sort((a, b) => b.value - a.value);
+  }
+
+  function getItemChartLabel(item, productMap) {
+    const prod = productMap[item.productId];
+    if (!prod) return 'Desconocido';
+    return prod.presentationName + ' · ' + prod.categoryName;
+  }
+
+  function getItemChartValue(tab, item, productMap, type, metric) {
+    const meta = getReportItemMeta(item, productMap, type);
+    if (metric === 'qty') return meta.qty;
+    if (tab === 'utilidad') {
+      const prod = productMap[item.productId];
+      return (item.unitPrice - (prod?.purchasePrice || 0)) * item.quantity;
+    }
+    return meta.value;
+  }
+
+  function buildGridChartBars(tab, items, productMap, type, axis, metric) {
+    const barMap = new Map();
+    items.forEach((item) => {
+      const meta = getReportItemMeta(item, productMap, type);
+      const barKey = axis === 'cat' ? (meta.cat || 'Sin categoría') : (meta.pres || 'Sin presentación');
+      const segKey = axis === 'cat' ? (meta.pres || 'Sin presentación') : (meta.cat || 'Sin categoría');
+      if (!barMap.has(barKey)) {
+        barMap.set(barKey, { label: barKey, qty: 0, value: 0, margin: 0, segments: new Map() });
+      }
+      const bar = barMap.get(barKey);
+      const qty = meta.qty;
+      const value = getItemChartValue(tab, item, productMap, type, 'value');
+      const margin = tab === 'utilidad' ? getItemChartValue(tab, item, productMap, type, 'margin') : 0;
+      bar.qty += qty;
+      bar.value += value;
+      bar.margin += margin;
+      if (!bar.segments.has(segKey)) {
+        bar.segments.set(segKey, { label: segKey, qty: 0, value: 0, margin: 0 });
+      }
+      const seg = bar.segments.get(segKey);
+      seg.qty += qty;
+      seg.value += value;
+      seg.margin += margin;
+    });
+
+    return [...barMap.values()]
+      .map((bar) => {
+        const segments = [...bar.segments.values()]
+          .filter((s) => getBarDisplayValue(s, metric, tab) > 0)
+          .sort((a, b) => getBarDisplayValue(b, metric, tab) - getBarDisplayValue(a, metric, tab));
+        return {
+          label: shortenChartLabel(bar.label),
+          qty: bar.qty,
+          value: bar.value,
+          margin: bar.margin,
+          displayValue: getBarDisplayValue(bar, metric, tab),
+          details: segments,
+          segments: segments.map((seg, i) => ({
+            ...seg,
+            displayValue: getBarDisplayValue(seg, metric, tab),
+            colorIndex: i % 8
+          }))
+        };
+      })
+      .filter((b) => b.displayValue > 0)
+      .sort((a, b) => b.displayValue - a.displayValue)
+      .slice(0, 20);
+  }
+
+  function buildReportChartBars(tab, items, sortState, productMap, type, contextKey, chartRangeOpts) {
+    if (!items.length && !(chartRangeOpts && sortState.groupBy === 'time')) return [];
+
+    const metric = getChartMetric(tab, sortState, contextKey);
+
+    if (sortState.groupBy === 'time' && chartRangeOpts) {
+      return buildTimeBucketChartBars(
+        tab,
+        items,
+        productMap,
+        type,
+        chartRangeOpts.from,
+        chartRangeOpts.to,
+        chartRangeOpts.bucket,
+        metric
+      );
+    }
+
+    if (!items.length) return [];
+
+    if (isGridSortState(sortState)) {
+      const axis = getChartGridAxis(contextKey, sortState);
+      return buildGridChartBars(tab, items, productMap, type, axis, metric);
+    }
+
+    const groups = buildItemGroups(items, sortState, type, productMap, false);
+
+    if (sortState.groupBy === 'value' || sortState.groupBy === 'qty') {
+      const flatItems = groups[0]?.items || [];
+      return flatItems.slice(0, 20).map((item) => {
+        const qty = getItemChartValue(tab, item, productMap, type, 'qty');
+        const value = getItemChartValue(tab, item, productMap, type, 'value');
+        const margin = tab === 'utilidad' ? getItemChartValue(tab, item, productMap, type, 'margin') : 0;
+        const displayValue = metric === 'qty' ? qty : (tab === 'utilidad' ? margin : value);
+        return {
+          label: shortenChartLabel(getItemChartLabel(item, productMap)),
+          qty,
+          value,
+          margin,
+          displayValue,
+          details: [{
+            label: getItemChartLabel(item, productMap),
+            qty,
+            value,
+            margin
+          }]
+        };
+      }).filter((b) => b.displayValue > 0);
+    }
+
+    const detailField = sortState.groupBy === 'cat' ? 'pres'
+      : (sortState.groupBy === 'pres' ? 'cat' : 'product');
+
+    return groups
+      .filter((g) => g.key && g.items.length)
+      .map((group) => {
+        const totals = computeGroupTotals(group.items, false, type, productMap);
+        let margin = 0;
+        if (tab === 'utilidad') {
+          group.items.forEach((item) => {
+            margin += getItemChartValue(tab, item, productMap, type, 'margin');
+          });
+        }
+        const displayValue = metric === 'qty' ? totals.qty : (tab === 'utilidad' ? margin : totals.value);
+        return {
+          label: shortenChartLabel(group.key),
+          qty: totals.qty,
+          value: totals.value,
+          margin,
+          displayValue,
+          details: aggregateItemsToDetails(group.items, tab, productMap, type, detailField)
+        };
+      })
+      .filter((b) => b.displayValue > 0);
+  }
+
+  function renderChartMetricToolbar(contextKey, metric) {
+    return (
+      '<div class="chart-toolbar tabs chart-metric-tabs" data-chart-context="' + contextKey + '">' +
+        '<button type="button" class="tab' + (metric === 'value' ? ' active' : '') + '" data-chart-metric="value">Valor</button>' +
+        '<button type="button" class="tab' + (metric === 'qty' ? ' active' : '') + '" data-chart-metric="qty">Cantidad</button>' +
+      '</div>'
+    );
+  }
+
+  function renderChartGridToolbar(contextKey, axis) {
+    return (
+      '<div class="chart-toolbar tabs chart-grid-tabs" data-chart-context="' + contextKey + '">' +
+        '<button type="button" class="tab' + (axis === 'cat' ? ' active' : '') + '" data-chart-grid-axis="cat">Por categoría</button>' +
+        '<button type="button" class="tab' + (axis === 'pres' ? ' active' : '') + '" data-chart-grid-axis="pres">Por presentación</button>' +
+      '</div>'
+    );
+  }
+
+  function storeChartBars(bars) {
+    const id = 'chart-' + (++chartBarDataSeq);
+    chartBarDataStore[id] = bars;
+    return id;
+  }
+
+  function renderBarChartCard({ title, bars, barClass, metric, tab, emptyText, toolbarsHtml, chartId }) {
+    const toolbarsBlock = toolbarsHtml
+      ? '<div class="chart-toolbars-below">' + toolbarsHtml + '</div>'
+      : '';
+
+    if (!bars.length) {
+      return (
+        '<div class="card report-chart-card">' +
+          '<div class="card-title">' + escapeHtml(title) + '</div>' +
+          emptyState(emptyText || 'Sin datos') +
+          toolbarsBlock +
+        '</div>'
+      );
+    }
+
+    const max = Math.max(...bars.map((b) => b.displayValue), 1);
+    const scrollClass = bars.length > 5 ? ' report-chart--scroll' : '';
+
+    const barsHtml = bars.map((b, i) => {
+      const pct = b.displayValue > 0 ? Math.max(4, (b.displayValue / max) * 100) : 0;
+      const cls = b.cls || barClass || '';
+      let fillHtml;
+      if (b.segments && b.segments.length) {
+        fillHtml = '<div class="report-chart-bar__fill-stack" style="--h:' + pct + '%">' +
+          b.segments.map((seg) => {
+            const segPct = b.displayValue > 0 ? (seg.displayValue / b.displayValue) * 100 : 0;
+            return '<span class="report-chart-bar__segment chart-seg-' + seg.colorIndex + '" style="--seg-h:' + segPct + '%"></span>';
+          }).join('') +
+        '</div>';
+      } else {
+        fillHtml = '<span class="report-chart-bar__fill"></span>';
+      }
+      return (
+        '<button type="button" class="report-chart-bar ' + cls + '" style="--h:' + pct + '%" data-bar-index="' + i + '">' +
+          '<span class="report-chart-bar__value">' + escapeHtml(formatChartDisplayValue(b.displayValue, metric)) + '</span>' +
+          fillHtml +
+          '<span class="report-chart-bar__label">' + escapeHtml(b.label) + '</span>' +
+        '</button>'
+      );
+    }).join('');
+
+    return (
+      '<div class="card report-chart-card" data-chart-id="' + chartId + '" data-chart-tab="' + escapeHtml(tab || '') + '" data-chart-metric="' + metric + '">' +
+        '<div class="card-title">' + escapeHtml(title) + '</div>' +
+        '<div class="report-chart' + scrollClass + '">' + barsHtml + '</div>' +
+        toolbarsBlock +
+      '</div>'
+    );
+  }
+
+  function renderReportTabChart(tab, summary, sortState) {
+    const margin = summary.margin || { total: 0, grouped: {} };
+
+    if (tab === 'resumen') {
+      const exitValue = summary.exits.items.reduce((sum, item) => {
+        const prod = summary.productMap[item.productId];
+        return sum + item.quantity * (prod?.standardPrice || 0);
+      }, 0);
+
+      const resumenBars = [
+        { label: 'Ventas', qty: summary.sales.totalUnits, value: summary.sales.totalMoney, displayValue: summary.sales.totalMoney, cls: 'report-chart-bar--sales', details: [{ label: 'Ventas', qty: summary.sales.totalUnits, value: summary.sales.totalMoney, margin: margin.total }] },
+        { label: 'Utilidad', qty: summary.sales.totalUnits, value: margin.total, margin: margin.total, displayValue: margin.total, cls: 'report-chart-bar--margin', details: [{ label: 'Utilidad', qty: summary.sales.totalUnits, value: margin.total, margin: margin.total }] },
+        { label: 'Entradas', qty: summary.entries.totalUnits, value: summary.entries.totalMoney || 0, displayValue: summary.entries.totalMoney || 0, cls: 'report-chart-bar--entries', details: [{ label: 'Entradas', qty: summary.entries.totalUnits, value: summary.entries.totalMoney || 0, margin: 0 }] },
+        { label: 'Salidas', qty: summary.exits.totalUnits, value: exitValue, displayValue: exitValue, cls: 'report-chart-bar--exits', details: [{ label: 'Salidas', qty: summary.exits.totalUnits, value: exitValue, margin: 0 }] }
+      ];
+      const chartId = storeChartBars(resumenBars);
+      return renderBarChartCard({
+        title: 'Resumen visual',
+        bars: resumenBars,
+        barClass: 'report-chart-bar--sales',
+        metric: 'value',
+        tab: 'resumen',
+        emptyText: 'Sin movimientos en esta fecha',
+        chartId
+      });
+    }
+
+    const chartConfig = {
+      ventas: { items: summary.sales.items, type: 'sale', barClass: 'report-chart-bar--sales', emptyText: 'Sin ventas en esta fecha' },
+      entradas: { items: summary.entries.items, type: 'in', barClass: 'report-chart-bar--entries', emptyText: 'Sin entradas en esta fecha' },
+      salidas: { items: summary.exits.items, type: 'out', barClass: 'report-chart-bar--exits', emptyText: 'Sin salidas en esta fecha' },
+      utilidad: { items: summary.sales.items, type: 'sale', barClass: 'report-chart-bar--margin', emptyText: 'Sin ventas para calcular utilidad' }
+    };
+
+    const cfg = chartConfig[tab];
+    if (!cfg || !sortState) return '';
+
+    const contextKey = getReportChartContext(tab);
+    const metric = getChartMetric(tab, sortState, contextKey);
+    const isTimeChart = sortState.groupBy === 'time';
+    let chartItems = cfg.items;
+    let chartRangeOpts = null;
+
+    if (isTimeChart) {
+      ensureChartRangeDefaults(contextKey);
+      chartRangeOpts = {
+        from: reportChartRange[contextKey].from,
+        to: reportChartRange[contextKey].to,
+        bucket: reportChartBucket[contextKey]
+      };
+      const rangeData = reportChartRangeData[contextKey];
+      if (rangeData) {
+        chartItems = getReportChartRangeItems(tab, rangeData);
+      }
+    }
+
+    let toolbarsHtml = '';
+    if (isChartGroupMode(sortState) || isGridSortState(sortState)) {
+      toolbarsHtml += renderChartMetricToolbar(contextKey, metric);
+    }
+    if (isGridSortState(sortState)) {
+      toolbarsHtml += renderChartGridToolbar(contextKey, getChartGridAxis(contextKey, sortState));
+    }
+    if (isTimeChart) {
+      toolbarsHtml += renderChartTimeToolbars(contextKey);
+    }
+
+    if (isTimeChart && !reportChartRangeData[contextKey]) {
+      const chartId = storeChartBars([]);
+      return renderBarChartCard({
+        title: getReportChartTitle(tab, sortState, contextKey),
+        bars: [],
+        barClass: cfg.barClass,
+        metric,
+        tab,
+        emptyText: 'Cargando datos del período…',
+        toolbarsHtml,
+        chartId
+      });
+    }
+
+    const bars = buildReportChartBars(tab, chartItems, sortState, summary.productMap, cfg.type, contextKey, chartRangeOpts)
+      .map((b) => ({ ...b, cls: cfg.barClass }));
+
+    const chartId = storeChartBars(bars);
+    return renderBarChartCard({
+      title: getReportChartTitle(tab, sortState, contextKey),
+      bars,
+      barClass: cfg.barClass,
+      metric,
+      tab,
+      emptyText: isTimeChart ? 'Sin datos en este período' : cfg.emptyText,
+      toolbarsHtml,
+      chartId
+    });
+  }
+
+  function formatChartTooltipHtml(bar, tab, metric) {
+    const details = bar.details || [];
+    let html = '<div class="chart-tooltip-title">' + escapeHtml(bar.label) + '</div>';
+    details.forEach((d) => {
+      const total = tab === 'utilidad' ? d.margin : d.value;
+      const unit = d.qty > 0 ? total / d.qty : 0;
+      html += '<div class="chart-tooltip-row">';
+      html += '<span class="chart-tooltip-name">' + escapeHtml(d.label) + '</span>';
+      html += '<span class="chart-tooltip-formula">' + formatGridUnits(d.qty) + ' × ' + DB.formatMoney(unit) + ' = ' + DB.formatMoney(total) + '</span>';
+      html += '</div>';
+    });
+    if (details.length > 1) {
+      const totalQty = bar.qty;
+      const totalVal = tab === 'utilidad' ? bar.margin : bar.value;
+      html += '<div class="chart-tooltip-total">' + formatGridUnits(totalQty) + ' · ' + DB.formatMoney(totalVal) + '</div>';
+    }
+    return html;
+  }
+
+  function ensureChartTooltip() {
+    let el = $('#chart-tooltip');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'chart-tooltip';
+      el.className = 'chart-tooltip hidden';
+      el.setAttribute('role', 'tooltip');
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+
+  function hideChartTooltip() {
+    const el = $('#chart-tooltip');
+    if (el) {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+    }
+    document.querySelectorAll('.report-chart-bar.is-active').forEach((b) => b.classList.remove('is-active'));
+  }
+
+  function showChartTooltip(barBtn, chartCard) {
+    const chartId = chartCard.dataset.chartId;
+    const index = parseInt(barBtn.dataset.barIndex, 10);
+    const bars = chartBarDataStore[chartId];
+    if (!bars || !bars[index]) return;
+
+    const bar = bars[index];
+    const tab = chartCard.dataset.chartTab || 'ventas';
+    const metric = chartCard.dataset.chartMetric || 'value';
+    const tooltip = ensureChartTooltip();
+
+    document.querySelectorAll('.report-chart-bar.is-active').forEach((b) => b.classList.remove('is-active'));
+    barBtn.classList.add('is-active');
+
+    tooltip.innerHTML = formatChartTooltipHtml(bar, tab, metric);
+    tooltip.classList.remove('hidden');
+    tooltip.style.visibility = 'hidden';
+    tooltip.style.left = '0';
+    tooltip.style.top = '0';
+
+    requestAnimationFrame(() => {
+      const rect = barBtn.getBoundingClientRect();
+      const tipRect = tooltip.getBoundingClientRect();
+      let left = rect.left + rect.width / 2 - tipRect.width / 2;
+      let top = rect.top - tipRect.height - 8;
+      if (left < 8) left = 8;
+      if (left + tipRect.width > window.innerWidth - 8) left = window.innerWidth - tipRect.width - 8;
+      if (top < 8) top = rect.bottom + 8;
+      tooltip.style.left = left + 'px';
+      tooltip.style.top = top + 'px';
+      tooltip.style.visibility = 'visible';
+    });
+  }
+
+  function bindChartUI() {
+    document.querySelectorAll('[data-chart-metric]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const ctx = btn.closest('[data-chart-context]')?.dataset.chartContext;
+        if (!ctx) return;
+        reportChartMetric[ctx] = btn.dataset.chartMetric;
+        hideChartTooltip();
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-chart-grid-axis]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const ctx = btn.closest('[data-chart-context]')?.dataset.chartContext;
+        if (!ctx) return;
+        reportChartGridAxis[ctx] = btn.dataset.chartGridAxis;
+        hideChartTooltip();
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-chart-bucket]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const ctx = btn.closest('[data-chart-context]')?.dataset.chartContext;
+        if (!ctx) return;
+        reportChartBucket[ctx] = btn.dataset.chartBucket;
+        hideChartTooltip();
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-chart-from]').forEach((input) => {
+      input.addEventListener('change', () => {
+        const ctx = input.closest('[data-chart-context]')?.dataset.chartContext;
+        if (!ctx) return;
+        ensureChartRangeDefaults(ctx);
+        const from = fromDateInputValue(input.value);
+        const to = reportChartRange[ctx].to;
+        applyChartRangeChange(ctx, from, to);
+      });
+    });
+
+    document.querySelectorAll('[data-chart-to]').forEach((input) => {
+      input.addEventListener('change', () => {
+        const ctx = input.closest('[data-chart-context]')?.dataset.chartContext;
+        if (!ctx) return;
+        ensureChartRangeDefaults(ctx);
+        const from = reportChartRange[ctx].from;
+        const to = fromDateInputValue(input.value);
+        applyChartRangeChange(ctx, from, to);
+      });
+    });
+
+    document.querySelectorAll('.report-chart-bar[data-bar-index]').forEach((barBtn) => {
+      barBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const card = barBtn.closest('.report-chart-card');
+        if (!card) return;
+        const tooltip = $('#chart-tooltip');
+        if (barBtn.classList.contains('is-active') && tooltip && !tooltip.classList.contains('hidden')) {
+          hideChartTooltip();
+          return;
+        }
+        showChartTooltip(barBtn, card);
+      });
+    });
+
+    if (!bindChartUI._outsideBound) {
+      bindChartUI._outsideBound = true;
+      document.addEventListener('click', (e) => {
+        if (e.target.closest('.report-chart-bar') || e.target.closest('#chart-tooltip')) return;
+        hideChartTooltip();
+      });
+    }
   }
 
   function applyTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('ventas-theme', theme);
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', theme === 'dark' ? '#0a0e14' : '#e8f4f2');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#0a0e14' : '#b8e6dc');
     const btn = $('#theme-toggle');
     if (btn) {
       btn.innerHTML = theme === 'dark' ? Icons.sun() : Icons.moon();
@@ -906,7 +2022,7 @@ const App = (function () {
         const currentStock = selectedProduct ? (stockMap[selectedProduct.id] ?? 0) : null;
         const stockHint = selectedProduct
           ? '<p class="sale-stock-hint ' + (currentStock <= 0 ? 'stock-low' : 'stock-ok') +
-            '">Disponible: ' + currentStock + ' uds</p>'
+            '">Disponible: ' + formatGridUnits(currentStock) + '</p>'
           : '';
 
         const singleHtml = `
@@ -969,7 +2085,7 @@ const App = (function () {
 
   function formatStockIssues(issues) {
     return issues.map((i) =>
-      i.name + ': hay ' + i.stock + ' uds, intentas vender ' + i.requested
+      i.name + ': hay ' + formatGridUnits(i.stock) + ', intentas vender ' + i.requested
     ).join('\n');
   }
 
@@ -1075,6 +2191,46 @@ const App = (function () {
     });
   }
 
+  function computeBulkPresTotals(presId, state, data, type) {
+    let qty = 0;
+    let value = 0;
+    if (!state?.allCategories || !state.rows?.length) return { qty, value };
+
+    state.rows.forEach((row) => {
+      const q = parseFloat(row.quantity) || 0;
+      if (q <= 0) return;
+      const prod = getProductForSelection(data.productLookup, row.categoryId, presId);
+      const price = row.purchasePrice !== '' && row.purchasePrice !== undefined
+        ? (parseFloat(row.purchasePrice) || 0)
+        : getMovementUnitPrice(prod, type);
+      qty += q;
+      value += q * price;
+    });
+    return { qty, value };
+  }
+
+  function formatBulkPresCardTitle(presName, state, totals) {
+    if (!state.allCategories) return presName;
+    return presName + ' · ' + formatGridUnits(totals.qty) + ' · ' + DB.formatMoney(totals.value);
+  }
+
+  function patchInvPresHeader(presId) {
+    const card = document.querySelector('.inv-pres-accordion[data-pres-id="' + presId + '"]');
+    if (!card || !inventoryCatalogData) return;
+    const pres = inventoryCatalogData.presentations.find((p) => p.id === presId);
+    if (!pres) return;
+
+    const state = bulkMovementPresState[presId] || { allCategories: false, rows: [] };
+    const totals = computeBulkPresTotals(presId, state, inventoryCatalogData, movementEntryType);
+    const titleEl = card.querySelector('.accordion-title');
+    if (titleEl) titleEl.textContent = formatBulkPresCardTitle(pres.name, state, totals);
+  }
+
+  function patchInvPresHeaders() {
+    if (!inventoryCatalogData) return;
+    getPresentationsInCatalog(inventoryCatalogData).forEach((pres) => patchInvPresHeader(pres.id));
+  }
+
   function renderInvPresBulkRow(row, rowIndex, presId, data, stockMap, categoriesById, priceLabel) {
     const prod = getProductForSelection(data.productLookup, row.categoryId, presId);
     const priceVal = row.purchasePrice !== '' && row.purchasePrice !== undefined
@@ -1136,6 +2292,7 @@ const App = (function () {
       inventoryStockMap,
       inventoryCategories || []
     );
+    patchInvPresHeader(presId);
   }
 
   function patchMovementTypeUI() {
@@ -1170,6 +2327,7 @@ const App = (function () {
       Object.keys(bulkMovementPresState).forEach((presId) => {
         if (bulkMovementPresState[presId].allCategories) patchInvPresGrid(presId);
       });
+      patchInvPresHeaders();
     }
 
     const movProduct = $('#mov-product');
@@ -1182,15 +2340,14 @@ const App = (function () {
 
   function renderInvPresBulkCard(pres, state, data, stockMap, categories) {
     const isOpen = openInvPresAccordions.has(pres.id);
-    const catCount = getCategoriesForPresentation(data.catalog, pres.id).size;
-    const defaultBuy = pres.defaultPurchasePrice ?? 0;
     const gridHtml = buildInvPresGridHtml(pres.id, state, data, stockMap, categories);
+    const totals = computeBulkPresTotals(pres.id, state, data, movementEntryType);
+    const titleText = formatBulkPresCardTitle(pres.name, state, totals);
 
     return `
       <div class="accordion inv-pres-accordion" data-pres-id="${pres.id}">
         <button type="button" class="accordion-header ${isOpen ? 'open' : ''}" data-inv-accordion-toggle="${pres.id}" aria-expanded="${isOpen}">
-          <span class="accordion-title">${escapeHtml(pres.name)}</span>
-          <span class="accordion-meta">Compra ${DB.formatMoney(defaultBuy)} · ${catCount} cat.</span>
+          <span class="accordion-title">${escapeHtml(titleText)}</span>
           <span class="accordion-chevron">${Icons.chevron(isOpen)}</span>
         </button>
         <div class="accordion-body">
@@ -1215,7 +2372,7 @@ const App = (function () {
       DB.getStockMap()
     ]).then(([stock, categories, presentations, products, stockMap]) => {
         const tabs = `
-          <div class="tabs">
+          <div class="tabs tabs--inv-main">
             <button type="button" class="tab ${inventoryTab === 'movimiento' ? 'active' : ''}" data-inv-tab="movimiento">Movimiento</button>
             <button type="button" class="tab ${inventoryTab === 'existencias' ? 'active' : ''}" data-inv-tab="existencias">Existencias</button>
           </div>
@@ -1273,8 +2430,8 @@ const App = (function () {
                   <input type="text" id="inv-bulk-note" placeholder="Ej: llegó del proveedor">
                 </div>
                 <div class="tabs inv-bulk-type-tabs">
-                  <button type="button" class="tab ${movementEntryType === 'in' ? 'active' : ''}" data-inv-bulk-mov-type="in">Entrada</button>
-                  <button type="button" class="tab ${movementEntryType === 'out' ? 'active' : ''}" data-inv-bulk-mov-type="out">Salida</button>
+                  <button type="button" class="tab tab--mov-in ${movementEntryType === 'in' ? 'active' : ''}" data-inv-bulk-mov-type="in">${Icons.arrowIn()} Entrada</button>
+                  <button type="button" class="tab tab--mov-out ${movementEntryType === 'out' ? 'active' : ''}" data-inv-bulk-mov-type="out">${Icons.arrowOut()} Salida</button>
                 </div>
                 <p class="inv-bulk-type-hint">${movementEntryType === 'in'
                   ? 'Se aplicará el precio de compra del catálogo en cada fila.'
@@ -1302,8 +2459,8 @@ const App = (function () {
                   <input type="text" id="mov-note" placeholder="Ej: llegó del proveedor">
                 </div>
                 <div class="tabs inv-bulk-type-tabs">
-                  <button type="button" class="tab ${movementEntryType === 'in' ? 'active' : ''}" data-mov-entry-type="in">Entrada</button>
-                  <button type="button" class="tab ${movementEntryType === 'out' ? 'active' : ''}" data-mov-entry-type="out">Salida</button>
+                  <button type="button" class="tab tab--mov-in ${movementEntryType === 'in' ? 'active' : ''}" data-mov-entry-type="in">${Icons.arrowIn()} Entrada</button>
+                  <button type="button" class="tab tab--mov-out ${movementEntryType === 'out' ? 'active' : ''}" data-mov-entry-type="out">${Icons.arrowOut()} Salida</button>
                 </div>
                 <button type="button" class="btn btn-primary inv-bulk-register" id="mov-register">Registrar</button>
               </form>
@@ -1353,7 +2510,7 @@ const App = (function () {
                 </div>
                 <div class="inline-actions">
                   ${editBtn('data-edit-cat="' + cat.id + '"', 'Editar categoría')}
-                  <button type="button" class="btn btn-danger btn-sm" data-del-cat="${cat.id}">Eliminar</button>
+                  ${delBtn('data-del-cat="' + cat.id + '"', 'Eliminar categoría')}
                 </div>
               </div>
             `;
@@ -1392,7 +2549,7 @@ const App = (function () {
                 </div>
                 <div class="inline-actions">
                   ${editBtn('data-edit-pres="' + p.id + '"', 'Editar presentación')}
-                  <button type="button" class="btn btn-danger btn-sm" data-del-pres="${p.id}">Eliminar</button>
+                  ${delBtn('data-del-pres="' + p.id + '"', 'Eliminar presentación')}
                 </div>
               </div>
             `;
@@ -1442,7 +2599,7 @@ const App = (function () {
       const firstPresPurchasePrice = presentations.length ? (presentations[0].defaultPurchasePrice || 0) : 0;
 
       const catalog = DB.getCatalogProducts(categories, presentations, products);
-      const list = renderCatalogAccordion(catalog);
+      const list = renderCatalogProductView(catalog, categories, presentations, catalogProductView);
 
       const canAddProduct = categories.length && presentations.length;
       const addForm = canAddProduct ? `
@@ -1487,9 +2644,8 @@ const App = (function () {
       return tabs + addForm + `
         <div class="card">
           <div class="card-title">Catálogo de productos</div>
-          <p style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px">
-            Un producto = categoría + presentación + precios de venta y compra
-          </p>
+          ${renderCatalogViewToolbar()}
+          <p class="catalog-view-hint">${catalogViewHint(catalogProductView)}</p>
           ${list}
         </div>
       `;
@@ -1548,24 +2704,28 @@ const App = (function () {
     let content = '';
 
     if (reportTab === 'resumen') {
-      content = resumen + `
-        <div class="card">
-          <div class="card-title">Ventas agrupadas</div>
-          ${renderGroupedList(s.sales.grouped, true)}
-        </div>
-        <div class="card">
-          <div class="card-title">Entradas agrupadas</div>
-          ${renderGroupedList(s.entries.grouped, true)}
-        </div>
-        <div class="card">
-          <div class="card-title">Salidas agrupadas</div>
-          ${renderGroupedList(s.exits.grouped, false)}
+      const exitValue = s.exits.items.reduce((sum, item) => {
+        const prod = s.productMap[item.productId];
+        return sum + item.quantity * (prod?.standardPrice || 0);
+      }, 0);
+
+      if (!openResumenAccordions.size) {
+        openResumenAccordions.add('ventas');
+      }
+
+      content = resumen + renderReportTabChart('resumen', s) + `
+        <div class="report-resumen-grid">
+          ${renderResumenAccordionCard('ventas', 'Ventas', s.sales.grouped, true, s.sales.totalUnits, s.sales.totalMoney)}
+          ${renderResumenAccordionCard('entradas', 'Entradas', s.entries.grouped, true, s.entries.totalUnits, s.entries.totalMoney || 0)}
+          ${renderResumenAccordionCard('salidas', 'Salidas', s.exits.grouped, false, s.exits.totalUnits, exitValue)}
         </div>
       `;
     } else if (reportTab === 'utilidad') {
       content = `
         <div class="card">
           <div class="card-title">Utilidad por producto</div>
+          ${renderGroupToolbar(reportSalesSortState, 'report-sales')}
+          ${renderReportTabChart('utilidad', s, reportSalesSortState)}
           <p class="field-hint">Costo según precio de compra actual del catálogo.</p>
           ${renderGroupedMarginList(margin.grouped)}
           <div class="total-row"><span>Costo total vendido</span><span>${DB.formatMoney(margin.totalCost)}</span></div>
@@ -1579,7 +2739,8 @@ const App = (function () {
         <div class="card">
           <div class="card-title">Detalle de ventas</div>
           ${renderGroupToolbar(reportSalesSortState, 'report-sales')}
-          ${s.sales.items.length ? renderRecentList(s.sales.items, s.productMap, 'sale', null, true, true, reportSalesSortState) : emptyState(emptyDay)}
+          ${renderReportTabChart('ventas', s, reportSalesSortState)}
+          ${s.sales.items.length ? renderRecentList(s.sales.items, s.productMap, 'sale', null, true, true, reportSalesSortState, 'report-sales') : emptyState(emptyDay)}
           <div class="total-row"><span>Total ventas</span><span>${DB.formatMoney(s.sales.totalMoney)}</span></div>
           <div class="total-row margin-row"><span>Utilidad</span><span>${DB.formatMoney(margin.total)}</span></div>
           ${s.sales.items.length ? `
@@ -1596,7 +2757,8 @@ const App = (function () {
         <div class="card">
           <div class="card-title">Detalle de entradas</div>
           ${renderGroupToolbar(reportEntriesSortState, 'report-entries')}
-          ${s.entries.items.length ? renderRecentList(s.entries.items, s.productMap, 'in', null, true, false, reportEntriesSortState) : emptyState(emptyDay)}
+          ${renderReportTabChart('entradas', s, reportEntriesSortState)}
+          ${s.entries.items.length ? renderRecentList(s.entries.items, s.productMap, 'in', null, true, false, reportEntriesSortState, 'report-entries') : emptyState(emptyDay)}
           <div class="total-row"><span>Total unidades</span><span>${s.entries.totalUnits}</span></div>
           <div class="total-row"><span>Total compra</span><span>${DB.formatMoney(s.entries.totalMoney || 0)}</span></div>
         </div>
@@ -1606,7 +2768,8 @@ const App = (function () {
         <div class="card">
           <div class="card-title">Detalle de salidas</div>
           ${renderGroupToolbar(reportExitsSortState, 'report-exits')}
-          ${s.exits.items.length ? renderRecentList(s.exits.items, s.productMap, 'out', null, true, false, reportExitsSortState) : emptyState(emptyDay)}
+          ${renderReportTabChart('salidas', s, reportExitsSortState)}
+          ${s.exits.items.length ? renderRecentList(s.exits.items, s.productMap, 'out', null, true, false, reportExitsSortState, 'report-exits') : emptyState(emptyDay)}
           <div class="total-row"><span>Total unidades</span><span>${s.exits.totalUnits}</span></div>
         </div>
       `;
@@ -1620,9 +2783,16 @@ const App = (function () {
           <button type="button" class="btn btn-secondary" data-export="excel">Excel</button>
           <button type="button" class="btn btn-secondary" data-export="json">JSON</button>
         </div>
-        <button type="button" class="btn btn-secondary" data-export="backup" style="margin-top:10px">
-          Descargar respaldo completo (JSON)
-        </button>
+      </div>
+      <div class="card">
+        <div class="card-title">Respaldo completo</div>
+        <p class="field-hint">Guarda o restaura catálogo, ventas y movimientos. El archivo JSON se puede enviar por WhatsApp, Gmail u otra app.</p>
+        <div class="backup-buttons">
+          <button type="button" class="btn btn-secondary" data-export="backup">Descargar JSON</button>
+          <button type="button" class="btn btn-secondary" data-export="share-backup">Compartir</button>
+          <button type="button" class="btn btn-secondary" id="btn-import-backup">Importar JSON</button>
+        </div>
+        <input type="file" id="backup-file-input" accept=".json,application/json" hidden>
       </div>
     `;
   }
@@ -1639,7 +2809,7 @@ const App = (function () {
       venta: renderVenta,
       inventario: renderInventario,
       catalogo: renderCatalogo,
-      reportes: () => Promise.resolve(renderReportes())
+      reportes: () => refreshActiveReportChartRange().then(() => renderReportes())
     };
 
     const renderer = renderers[currentView];
@@ -1668,6 +2838,7 @@ const App = (function () {
   }
 
   function refreshAllSummaries() {
+    invalidateReportChartRangeData();
     return Promise.all([refreshSummary(), refreshReportSummary()]);
   }
 
@@ -1675,6 +2846,8 @@ const App = (function () {
     const d = new Date(date);
     d.setHours(0, 0, 0, 0);
     reportDate = d;
+    reportChartRange = {};
+    invalidateReportChartRangeData();
     return refreshReportSummary();
   }
 
@@ -1711,6 +2884,28 @@ const App = (function () {
     });
   }
 
+  function bindListGroupAccordions() {
+    document.querySelectorAll('[data-list-group-toggle]').forEach((header) => {
+      const id = header.dataset.listGroupToggle;
+      const body = header.nextElementSibling;
+      if (!body) return;
+
+      const isOpen = openListGroups.has(id);
+      header.classList.toggle('open', isOpen);
+      header.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      UI.setAccordion(header, body, isOpen, false);
+
+      header.addEventListener('click', () => {
+        const willOpen = !header.classList.contains('open');
+        if (willOpen) openListGroups.add(id);
+        else openListGroups.delete(id);
+        UI.setAccordion(header, body, willOpen, true);
+        const chevron = header.querySelector('.accordion-chevron .ui-icon--chevron');
+        if (chevron) chevron.classList.toggle('is-open', willOpen);
+      });
+    });
+  }
+
   function bindGroupSortUI() {
     document.querySelectorAll('[data-group-context]').forEach((toolbar) => {
       const ctx = toolbar.dataset.groupContext;
@@ -1720,11 +2915,15 @@ const App = (function () {
       toolbar.querySelectorAll('[data-group-mode]').forEach((btn) => {
         btn.addEventListener('click', () => {
           const mode = btn.dataset.groupMode;
-          if (state.groupBy !== mode) {
-            state.groupBy = mode;
-            state.dir = defaultDirForGroupMode(mode);
+          handleGroupModeClick(state, mode);
+          if (mode === 'time' && currentView === 'reportes') {
+            const chartCtx = getReportChartContext(reportTab);
+            ensureChartRangeDefaults(chartCtx);
+            invalidateReportChartRangeData(chartCtx);
+            refreshReportChartRangeForContext(chartCtx).then(() => render());
+          } else {
+            render();
           }
-          render();
         });
       });
 
@@ -1792,7 +2991,9 @@ const App = (function () {
 
   function syncSingleFromDOM() {
     if ($('#sale-qty')) singleSaleDraft.qty = $('#sale-qty').value;
-    if ($('#sale-price')) singleSaleDraft.price = $('#sale-price').value;
+    if ($('#sale-price') && document.activeElement === $('#sale-price')) {
+      singleSaleDraft.price = $('#sale-price').value;
+    }
   }
 
   function syncMultiRowsFromDOM() {
@@ -1802,7 +3003,7 @@ const App = (function () {
         categoryId: el.querySelector('.multi-cat').value,
         presentationId: el.querySelector('.multi-pres').value,
         quantity: parseFloat(el.querySelector('.multi-qty').value) || 0,
-        price: parseFloat(el.querySelector('.multi-price').value) || 0
+        price: parseCompactMoney(el.querySelector('.multi-price').value)
       });
     });
     multiSaleRows = rows.length ? rows : multiSaleRows;
@@ -1854,8 +3055,8 @@ const App = (function () {
       lines.forEach((line) => {
         const stock = stockMap[line.productId] ?? 0;
         const warn = line.quantity > stock
-          ? '<div class="sale-stock-warn">Stock insuficiente: hay ' + stock + ' uds</div>'
-          : '<div class="list-item-sub">Stock disponible: ' + stock + ' uds</div>';
+          ? '<div class="sale-stock-warn">Stock insuficiente: hay ' + formatGridUnits(stock) + '</div>'
+          : '<div class="list-item-sub">Stock disponible: ' + formatGridUnits(stock) + '</div>';
 
         html += '<div class="list-item">';
         html += '<div class="list-item-main">';
@@ -1910,7 +3111,7 @@ const App = (function () {
         '<select class="multi-cat" aria-label="Categoría">' + catOptions + '</select>' +
         '<select class="multi-pres" aria-label="Presentación">' + (presOptions || '<option value="">—</option>') + '</select>' +
         '<input class="multi-qty" type="number" min="0.01" step="any" value="' + row.quantity + '" inputmode="decimal" aria-label="Cantidad">' +
-        '<input class="multi-price" type="number" min="0" step="1" value="' + priceVal + '" inputmode="numeric" aria-label="Precio">' +
+        '<input class="multi-price" type="text" value="' + escapeHtml(formatCompactMoney(priceVal)) + '" inputmode="decimal" aria-label="Precio">' +
         (index > 0
           ? '<button type="button" class="btn-icon btn-remove-row" aria-label="Quitar fila">' + Icons.close() + '</button>'
           : '<span class="btn-icon-spacer"></span>') +
@@ -1938,9 +3139,13 @@ const App = (function () {
       getPresentationsForCategory(data.catalog, singleSaleSelection.categoryId).has(p.id);
 
     const selectedProduct = ensureSingleSaleSelection(data);
-    if (selectedProduct && selectedProduct.id !== singleSaleProductId) {
-      singleSaleDraft.price = String(selectedProduct.standardPrice);
-      singleSaleProductId = selectedProduct.id;
+    if (selectedProduct) {
+      const selKey = (singleSaleSelection.categoryId || '') + '|' + (singleSaleSelection.presentationId || '');
+      if (selKey !== singleSaleLastSelKey || selectedProduct.id !== singleSaleProductId) {
+        singleSaleDraft.price = String(selectedProduct.standardPrice);
+        singleSaleProductId = selectedProduct.id;
+        singleSaleLastSelKey = selKey;
+      }
     }
 
     const catEl = $('#sale-cat-chips');
@@ -1961,7 +3166,7 @@ const App = (function () {
     if (selectedProduct) {
       const hintHtml =
         '<p class="sale-stock-hint ' + (currentStock <= 0 ? 'stock-low' : 'stock-ok') +
-        '">Disponible: ' + currentStock + ' uds</p>';
+        '">Disponible: ' + formatGridUnits(currentStock) + '</p>';
       if (hintEl) hintEl.outerHTML = hintHtml;
       else $('#sale-pres-chips')?.closest('.form-group')?.insertAdjacentHTML('afterend', hintHtml);
     } else if (hintEl) {
@@ -2019,6 +3224,7 @@ const App = (function () {
         );
         singleSaleProductId = prod?.id || null;
         singleSaleDraft.price = prod ? String(prod.standardPrice) : null;
+        singleSaleLastSelKey = '';
         patchSingleSaleUI();
       });
     });
@@ -2035,6 +3241,7 @@ const App = (function () {
         );
         singleSaleProductId = prod?.id || null;
         singleSaleDraft.price = prod ? String(prod.standardPrice) : null;
+        singleSaleLastSelKey = '';
         patchSingleSaleUI();
       });
     });
@@ -2065,6 +3272,16 @@ const App = (function () {
         const prod = getProductForSelection(saleCatalogData.productLookup, catSelect.value, presSelect.value);
         multiSaleRows[idx].price = prod?.standardPrice || 0;
         patchMultiSaleRows();
+      });
+
+      const priceInput = rowEl.querySelector('.multi-price');
+      priceInput?.addEventListener('blur', () => {
+        const parsed = parseCompactMoney(priceInput.value);
+        priceInput.value = formatCompactMoney(parsed);
+      });
+      priceInput?.addEventListener('focus', () => {
+        const parsed = parseCompactMoney(priceInput.value);
+        if (parsed) priceInput.value = String(parsed);
       });
     });
 
@@ -2222,6 +3439,18 @@ const App = (function () {
   }
 
   function bindInventoryUI() {
+    const presCards = $('#inv-pres-cards');
+    if (presCards && !bindInventoryUI._presInputBound) {
+      bindInventoryUI._presInputBound = true;
+      presCards.addEventListener('input', (e) => {
+        if (!e.target.matches('.inv-qty, .inv-buy')) return;
+        const card = e.target.closest('.inv-pres-accordion');
+        if (!card) return;
+        syncBulkMovementFromDOM();
+        patchInvPresHeader(card.dataset.presId);
+      });
+    }
+
     document.querySelectorAll('[data-inv-mode]').forEach((btn) => {
       btn.addEventListener('click', () => {
         inventoryMode = btn.dataset.invMode;
@@ -2266,6 +3495,7 @@ const App = (function () {
           if (header && body) UI.setAccordion(header, body, true, true);
         }
         patchInvPresGrid(presId);
+        patchInvPresHeader(presId);
       });
     });
 
@@ -2350,6 +3580,151 @@ const App = (function () {
   }
 
   // --- Event binding ---
+
+  function resetUiStateAfterImport() {
+    openCatalogAccordions.clear();
+    openResumenAccordions.clear();
+    openInvPresAccordions.clear();
+    openListGroups.clear();
+    reportChartRange = {};
+    invalidateReportChartRangeData();
+    chartBarDataStore = {};
+    reportDate = (() => {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      return d;
+    })();
+  }
+
+  function bindBackupUI() {
+    const fileInput = $('#backup-file-input');
+    $('#btn-import-backup')?.addEventListener('click', () => fileInput?.click());
+
+    fileInput?.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        let data;
+        try {
+          data = JSON.parse(String(reader.result || ''));
+        } catch (err) {
+          notifyError('El archivo no es un JSON válido');
+          return;
+        }
+
+        let summary;
+        try {
+          const cats = data.categories?.length || 0;
+          const pres = data.presentations?.length || 0;
+          const prods = data.products?.length || 0;
+          const sales = data.sales?.length || 0;
+          const movs = data.movements?.length || 0;
+          summary = cats + ' categorías · ' + pres + ' presentaciones · ' + prods + ' productos · ' +
+            sales + ' ventas · ' + movs + ' movimientos';
+        } catch (err) {
+          summary = '';
+        }
+
+        openConfirmModal({
+          title: 'Importar respaldo',
+          message: 'Se reemplazarán TODOS los datos actuales de este dispositivo.\n\n' +
+            (summary ? summary + '\n\n' : '') +
+            '¿Continuar?',
+          confirmLabel: 'Importar',
+          onConfirm: () => DB.importAllData(data)
+            .then((result) => {
+              resetUiStateAfterImport();
+              return refreshAllSummaries().then(() => result);
+            })
+            .then((result) => {
+              notifySuccess(
+                'Respaldo importado: ' + result.products + ' productos, ' +
+                result.sales + ' ventas, ' + result.movements + ' movimientos'
+              );
+              renderPersist();
+            })
+        });
+      };
+      reader.onerror = () => notifyError('No se pudo leer el archivo');
+      reader.readAsText(file);
+    });
+  }
+
+  function openBackupFilenameModal(data, mode) {
+    const suggested = Export.defaultBackupFilename();
+    openEditModal({
+      title: mode === 'share' ? 'Compartir respaldo' : 'Descargar respaldo',
+      fields: [{
+        key: 'filename',
+        label: 'Nombre del archivo',
+        type: 'text',
+        value: suggested
+      }],
+      submitLabel: mode === 'share' ? 'Compartir' : 'Descargar',
+      onSave: (vals) => {
+        const filename = Export.sanitizeBackupFilename(vals.filename, suggested);
+        if (mode === 'share') {
+          return Export.shareFullBackup(data, filename).then((shareMode) => {
+            showToast(shareMode === 'shared' ? 'Respaldo compartido' : 'Respaldo descargado (compartir no disponible)');
+          }).catch((err) => {
+            if (err && err.name === 'AbortError') return;
+            throw err;
+          });
+        }
+        Export.exportFullBackup(data, filename);
+        showToast('Respaldo descargado');
+      }
+    });
+  }
+
+  function runBackupDownload(data) {
+    const suggested = Export.defaultBackupFilename();
+    if (window.showSaveFilePicker) {
+      return Export.saveBackupWithPicker(data, suggested)
+        .then((savedName) => {
+          if (savedName) showToast('Respaldo descargado');
+        })
+        .catch((err) => {
+          if (err && err.name === 'AbortError') return;
+          openBackupFilenameModal(data, 'download');
+        });
+    }
+    openBackupFilenameModal(data, 'download');
+    return Promise.resolve();
+  }
+
+  function bindExportUI() {
+    document.querySelectorAll('[data-export]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const type = btn.dataset.export;
+        if (type === 'backup' || type === 'share-backup') {
+          DB.exportAllData().then((data) => {
+            if (type === 'share-backup') {
+              openBackupFilenameModal(data, 'share');
+              return;
+            }
+            return runBackupDownload(data);
+          }).catch((err) => {
+            if (err && err.message) notifyError(err.message);
+          });
+          return;
+        }
+
+        if (!reportSummary) {
+          showToast('Cargando reporte...');
+          return;
+        }
+        if (type === 'csv') Export.exportDailyCsv(reportSummary);
+        else if (type === 'excel') Export.exportDailyExcel(reportSummary);
+        else if (type === 'json') Export.exportDailyJson(reportSummary);
+
+        showToast('Reporte exportado');
+      });
+    });
+  }
 
   function bindEvents() {
     bindSaleUI();
@@ -2563,6 +3938,15 @@ const App = (function () {
     });
 
     UI.bindAccordions('[data-accordion-toggle]', 'accordionToggle', openCatalogAccordions);
+    UI.bindAccordions('[data-resumen-accordion]', 'resumenAccordion', openResumenAccordions);
+
+    document.querySelectorAll('[data-catalog-view]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (catalogProductView === btn.dataset.catalogView) return;
+        catalogProductView = btn.dataset.catalogView;
+        render();
+      });
+    });
 
     // Tabs
     document.querySelectorAll('[data-cat-tab]').forEach((btn) => {
@@ -2582,12 +3966,17 @@ const App = (function () {
     document.querySelectorAll('[data-rep-tab]').forEach((btn) => {
       btn.addEventListener('click', () => {
         reportTab = btn.dataset.repTab;
-        render();
+        refreshActiveReportChartRange().then(() => render());
       });
     });
 
     bindReportDateUI();
     bindGroupSortUI();
+    bindListGroupAccordions();
+    bindChartUI();
+    bindExportUI();
+    bindBackupUI();
+    requestAnimationFrame(() => bindMatrixCellFormat());
 
     document.querySelectorAll('[data-edit-sale]').forEach((btn) => {
       btn.addEventListener('click', () => openEditSaleModal(btn.dataset.editSale));
@@ -2647,31 +4036,6 @@ const App = (function () {
       });
     }
 
-    // Export
-    document.querySelectorAll('[data-export]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const type = btn.dataset.export;
-        if (type === 'backup') {
-          DB.exportAllData().then((data) => {
-            Export.exportFullBackup(data);
-            showToast('Respaldo descargado');
-          });
-          return;
-        }
-
-        if (!dailySummary) return;
-
-        if (!reportSummary) {
-          showToast('Cargando reporte...');
-          return;
-        }
-        if (type === 'csv') Export.exportDailyCsv(reportSummary);
-        else if (type === 'excel') Export.exportDailyExcel(reportSummary);
-        else if (type === 'json') Export.exportDailyJson(reportSummary);
-
-        showToast('Reporte exportado');
-      });
-    });
   }
 
   function init() {

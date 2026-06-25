@@ -30,6 +30,8 @@ const Icons = (function () {
     pencil: () => svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>', 'ui-icon--sm'),
     arrowUp: () => svg('<path d="m12 19V5M5 12l7-7 7 7"/>', 'ui-icon--sm'),
     arrowDown: () => svg('<path d="M12 5v14M5 12l7 7 7-7"/>', 'ui-icon--sm'),
+    arrowIn: () => svg('<path d="M12 5v14M5 12l7 7 7-7"/>', 'ui-icon--sm'),
+    arrowOut: () => svg('<path d="M12 19V5M5 12l7-7 7 7"/>', 'ui-icon--sm'),
     check: () => svg('<path d="m5 12 4 4L19 6"/>', 'ui-icon--sm'),
     alert: () => svg('<path d="M12 8v4M12 16h.01"/><path d="M10.3 3.6 1.8 18a1 1 0 0 0 .9 1.5h18.6a1 1 0 0 0 .9-1.5L13.7 3.6a1 1 0 0 0-1.8 0Z"/>', 'ui-icon--sm')
   };

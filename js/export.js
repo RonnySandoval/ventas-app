@@ -216,15 +216,66 @@ const Export = (function () {
     download(JSON.stringify(payload, null, 2), filename, 'application/json;charset=utf-8');
   }
 
-  function exportFullBackup(data) {
-    const filename = 'respaldo-ventas-' + dateStamp(new Date()) + '.json';
-    download(JSON.stringify(data, null, 2), filename, 'application/json;charset=utf-8');
+  function defaultBackupFilename() {
+    return 'respaldo-ventas-' + dateStamp(new Date()) + '.json';
+  }
+
+  function sanitizeBackupFilename(name, fallback) {
+    let base = String(name ?? '').trim();
+    if (!base) base = fallback || defaultBackupFilename();
+    base = base.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim();
+    if (!base) base = fallback || defaultBackupFilename();
+    if (!/\.json$/i.test(base)) base += '.json';
+    return base;
+  }
+
+  function exportFullBackup(data, filename) {
+    const name = sanitizeBackupFilename(filename, defaultBackupFilename());
+    download(JSON.stringify(data, null, 2), name, 'application/json;charset=utf-8');
+  }
+
+  async function saveBackupWithPicker(data, suggestedName) {
+    if (!window.showSaveFilePicker) return null;
+    const suggested = sanitizeBackupFilename(suggestedName, defaultBackupFilename());
+    const handle = await window.showSaveFilePicker({
+      suggestedName: suggested,
+      types: [{
+        description: 'JSON',
+        accept: { 'application/json': ['.json'] }
+      }]
+    });
+    const writable = await handle.createWritable();
+    await writable.write(JSON.stringify(data, null, 2));
+    await writable.close();
+    return handle.name || suggested;
+  }
+
+  async function shareFullBackup(data, filename) {
+    const name = sanitizeBackupFilename(filename, defaultBackupFilename());
+    const json = JSON.stringify(data, null, 2);
+    const file = new File([json], name, { type: 'application/json' });
+
+    if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+      await navigator.share({
+        files: [file],
+        title: 'Respaldo Ventas App',
+        text: 'Respaldo completo de catálogo, ventas e inventario'
+      });
+      return 'shared';
+    }
+
+    download(json, name, 'application/json;charset=utf-8');
+    return 'download';
   }
 
   return {
     exportDailyCsv,
     exportDailyExcel,
     exportDailyJson,
-    exportFullBackup
+    defaultBackupFilename,
+    sanitizeBackupFilename,
+    saveBackupWithPicker,
+    exportFullBackup,
+    shareFullBackup
   };
 })();

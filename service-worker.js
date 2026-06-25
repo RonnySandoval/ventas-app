@@ -3,7 +3,7 @@
  * Estrategia: cache-first para assets estáticos; fallback a index.html en navegación offline.
  * Incrementa CACHE_VERSION al publicar una nueva versión.
  */
-const CACHE_VERSION = '26';
+const CACHE_VERSION = '44';
 const CACHE_NAME = 'ventas-app-v' + CACHE_VERSION;
 
 const PRECACHE_ASSETS = [

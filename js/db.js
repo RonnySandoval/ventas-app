@@ -471,7 +471,7 @@ const DB = (function () {
   }
 
   function stockError(productLabel, current, requested) {
-    return productLabel + ': hay ' + current + ' uds, no se pueden retirar ' + requested;
+    return productLabel + ': hay ' + current + ' unid, no se pueden retirar ' + requested;
   }
 
   function getProductLabel(productId) {
@@ -880,6 +880,29 @@ const DB = (function () {
     return { grouped, totalMargin, totalCost };
   }
 
+  function getReportRangeData(from, to) {
+    const fromTs = startOfDay(from);
+    const toTs = endOfDay(to);
+    return Promise.all([
+      getCategories(),
+      getPresentations(),
+      getProducts(),
+      getSales(),
+      getMovements()
+    ]).then(([categories, presentations, products, sales, movements]) => {
+      const { productMap } = getProductMap(categories, presentations, products);
+      const inRange = (ts) => ts >= fromTs && ts <= toTs;
+      const rangeSales = sales.filter((s) => inRange(s.timestamp));
+      const rangeMovements = movements.filter((m) => inRange(m.timestamp));
+      return {
+        productMap,
+        sales: rangeSales,
+        entries: rangeMovements.filter((m) => m.type === 'in'),
+        exits: rangeMovements.filter((m) => m.type === 'out')
+      };
+    });
+  }
+
   function getDailySummary(date) {
     return Promise.all([
       getCategories(),
@@ -995,12 +1018,60 @@ const DB = (function () {
       getSales(),
       getMovements()
     ]).then(([categories, presentations, products, sales, movements]) => ({
+      schemaVersion: 1,
+      app: 'ventas-app',
       exportedAt: new Date().toISOString(),
       categories,
       presentations,
       products,
       sales,
       movements
+    }));
+  }
+
+  const BACKUP_STORES = ['categories', 'presentations', 'products', 'sales', 'movements'];
+
+  function validateBackupItem(item, label) {
+    if (!item || typeof item !== 'object' || !item.id) {
+      throw new Error('Registro inválido en ' + label);
+    }
+  }
+
+  function validateBackupPayload(data) {
+    if (!data || typeof data !== 'object') {
+      throw new Error('Archivo no válido');
+    }
+    BACKUP_STORES.forEach((key) => {
+      if (!Array.isArray(data[key])) {
+        throw new Error('Respaldo incompleto: falta «' + key + '»');
+      }
+      data[key].forEach((item) => validateBackupItem(item, key));
+    });
+    if (data.schemaVersion != null && data.schemaVersion > 1) {
+      throw new Error('Respaldo de una versión más nueva de la app');
+    }
+    return data;
+  }
+
+  function importAllData(data) {
+    const payload = validateBackupPayload(data);
+    return open().then((database) => new Promise((resolve, reject) => {
+      const transaction = database.transaction(BACKUP_STORES, 'readwrite');
+      transaction.oncomplete = () => resolve({
+        categories: payload.categories.length,
+        presentations: payload.presentations.length,
+        products: payload.products.length,
+        sales: payload.sales.length,
+        movements: payload.movements.length
+      });
+      transaction.onerror = () => reject(transaction.error);
+
+      BACKUP_STORES.forEach((name) => transaction.objectStore(name).clear());
+      payload.categories.forEach((item) => transaction.objectStore('categories').put(item));
+      payload.presentations.forEach((item) => transaction.objectStore('presentations').put(item));
+      payload.products.forEach((item) => transaction.objectStore('products').put(item));
+      payload.sales.forEach((item) => transaction.objectStore('sales').put(item));
+      payload.movements.forEach((item) => transaction.objectStore('movements').put(item));
     }));
   }
 
@@ -1032,11 +1103,13 @@ const DB = (function () {
     updateMovement,
     deleteMovement,
     getDailySummary,
+    getReportRangeData,
     getAllStock,
     getStockMap,
     checkSalesStock,
     calculateStock,
     exportAllData,
+    importAllData,
     getProductMap,
     resolveProductPrices,
     formatTime,
