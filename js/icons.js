@@ -48,7 +48,13 @@ const Icons = (function () {
       'M6 19.5C6 11 10.5 7.5 15.5 7.5H18.2L22.2 11L18.2 14.5H15.5C10.5 14.5 7.8 16.5 6 19.5Z',
       'ui-icon--sm ui-icon--filled'
     ),
-    upload: () => svg('<path d="M12 21V9M7 14l5-5 5 5"/><path d="M5 21h14"/>', 'ui-icon--sm')
+    upload: () => svg('<path d="M12 21V9M7 14l5-5 5 5"/><path d="M5 21h14"/>', 'ui-icon--sm'),
+    database: () => svg(
+      '<ellipse cx="12" cy="5" rx="8" ry="3"/>' +
+      '<path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/>' +
+      '<path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
+      'ui-icon--sm'
+    )
   };
 
   function mount(root) {

@@ -1,5 +1,6 @@
 const App = (function () {
   let currentView = 'inicio';
+  let lastMainView = 'inicio';
   let catalogTab = 'productos';
   let catalogProductView = 'matrix';
   let inventoryTab = 'movimiento';
@@ -41,6 +42,8 @@ const App = (function () {
   let reportChartRangeData = {};
   let chartBarDataStore = {};
   let chartBarDataSeq = 0;
+  let appImportMeta = { importName: '', importedAt: null, setupComplete: false };
+  let importSetupPending = false;
 
   const GROUP_MODES = [
     { id: 'cat', label: 'Categoría' },
@@ -55,7 +58,8 @@ const App = (function () {
     venta: 'Registrar venta',
     inventario: 'Inventario',
     catalogo: 'Catálogo',
-    reportes: 'Reportes del día'
+    reportes: 'Reportes del día',
+    datos: 'Datos y respaldo'
   };
 
   function $(selector) {
@@ -299,13 +303,69 @@ const App = (function () {
     UI.openModal($('#modal'));
   }
 
+  function needsImportSetup(meta) {
+    const m = meta || appImportMeta;
+    return m.setupComplete !== true;
+  }
+
   function setView(view) {
+    if (importSetupPending && view !== 'datos') {
+      showToast('Define un nombre para continuar');
+      return;
+    }
+    if (view !== 'datos') lastMainView = view;
     currentView = view;
     $('#page-title').textContent = titles[view] || view;
     document.querySelectorAll('.nav-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.view === view);
+      btn.classList.toggle('active', view !== 'datos' && btn.dataset.view === view);
     });
-    render();
+    const dataToggle = $('#data-toggle');
+    if (dataToggle) {
+      const onDatos = view === 'datos';
+      dataToggle.classList.toggle('is-active', onDatos);
+      dataToggle.setAttribute('aria-pressed', onDatos ? 'true' : 'false');
+    }
+    return render();
+  }
+
+  function toggleDatosView() {
+    if (importSetupPending) {
+      showToast('Define un nombre para continuar');
+      return;
+    }
+    if (currentView === 'datos') setView(lastMainView);
+    else {
+      if (currentView !== 'datos') lastMainView = currentView;
+      setView('datos');
+    }
+  }
+
+  function updateHeaderImportName() {
+    const el = $('#import-name');
+    if (!el) return;
+    const name = (appImportMeta.importName || '').trim();
+    if (name) {
+      el.textContent = name;
+      el.classList.remove('is-empty');
+      el.removeAttribute('aria-hidden');
+    } else {
+      el.textContent = 'Sin nombre de importación';
+      el.classList.add('is-empty');
+      el.removeAttribute('aria-hidden');
+    }
+  }
+
+  function refreshAppMeta() {
+    return DB.getImportMeta().then((meta) => {
+      appImportMeta = meta;
+      importSetupPending = needsImportSetup(meta);
+      updateHeaderImportName();
+      return meta;
+    });
+  }
+
+  function suggestedBackupFilename() {
+    return Export.defaultBackupFilename(appImportMeta.importName);
   }
 
   function updateHeaderDate() {
@@ -1277,6 +1337,17 @@ const App = (function () {
     );
   }
 
+  function renderCatalogStandaloneList(catalog) {
+    const standalone = catalog.filter((p) => !p.categoryId || !p.presentationId);
+    if (!standalone.length) return '';
+    return (
+      '<div class="card" style="margin-top:12px">' +
+        '<div class="card-title">Sin categoría o presentación completa</div>' +
+        standalone.map((item) => renderCatalogProductRow(item, item.label)).join('') +
+      '</div>'
+    );
+  }
+
   function renderCatalogCards(catalog, groupBy) {
     if (!catalog.length) {
       return emptyState('Sin productos en el catálogo', 'catalog');
@@ -1290,10 +1361,15 @@ const App = (function () {
 
     const grouped = {};
     catalog.forEach((item) => {
-      if (!grouped[item[groupKey]]) {
-        grouped[item[groupKey]] = { name: item[groupLabel], items: [] };
+      const rawKey = item[groupKey];
+      const key = rawKey || '__none__';
+      if (!grouped[key]) {
+        grouped[key] = {
+          name: rawKey ? item[groupLabel] : (isCat ? 'Sin categoría' : 'Sin presentación'),
+          items: []
+        };
       }
-      grouped[item[groupKey]].items.push(item);
+      grouped[key].items.push(item);
     });
 
     const keys = Object.keys(grouped).sort((a, b) => compareEs(grouped[a].name, grouped[b].name));
@@ -2120,6 +2196,10 @@ const App = (function () {
     }
   }
 
+  function setupDatosToggle() {
+    $('#data-toggle')?.addEventListener('click', toggleDatosView);
+  }
+
   function setupTheme() {
     const saved = localStorage.getItem('ventas-theme') || 'dark';
     applyTheme(saved);
@@ -2131,13 +2211,77 @@ const App = (function () {
 
   // --- Views ---
 
+  function renderDatos() {
+    const isSetup = importSetupPending;
+    const importName = escapeHtml(appImportMeta.importName || '');
+    const importedHint = isSetup
+      ? 'Este nombre aparecerá en el encabezado y en los archivos de respaldo JSON.'
+      : (appImportMeta.importedAt
+        ? 'Última importación: ' + escapeHtml(DB.formatDate(new Date(appImportMeta.importedAt)))
+        : 'Datos creados en este dispositivo.');
+    const resetBlock = isSetup ? '' : `
+        <div class="datos-reset-row">
+          <button type="button" class="btn-link-danger" id="btn-reset-all-data">Restaurar desde cero</button>
+        </div>`;
+    return `
+      <div class="card${isSetup ? ' datos-setup-card' : ''}">
+        <div class="card-title">${isSetup ? 'Bienvenido' : 'Importación activa'}</div>
+        <p class="field-hint">${isSetup
+          ? 'Antes de empezar, elige un nombre para identificar tus datos en esta app.'
+          : 'Nombre que identifica este conjunto de datos. Se muestra siempre en el encabezado y viaja en el respaldo JSON.'}</p>
+        <form id="import-name-form" class="import-name-form">
+          <div class="form-group" style="margin-bottom:10px">
+            <label for="import-name-input">Nombre de la importación</label>
+            <input type="text" id="import-name-input" maxlength="80" placeholder="Ej. Tienda centro, Feria sábado…" value="${importName}"${isSetup ? ' required' : ''}>
+          </div>
+          <button type="submit" class="btn btn-primary">${isSetup ? 'Empezar' : 'Guardar nombre'}</button>
+        </form>
+        <p class="field-hint" style="margin-top:10px">${importedHint}</p>
+        ${resetBlock}
+      </div>
+
+      <div class="card">
+        <div class="card-title">Respaldo completo</div>
+        <p class="field-hint">Guarda o restaura catálogo, ventas y movimientos. El archivo JSON se puede enviar por WhatsApp, Gmail u otra app.</p>
+        <div class="backup-buttons">
+          <button type="button" class="btn btn-secondary btn--stack-icon" data-export="backup">${Icons.download()}<span>Descargar</span></button>
+          <button type="button" class="btn btn-secondary btn--stack-icon" data-export="share-backup">${Icons.share()}<span>Compartir</span></button>
+          <button type="button" class="btn btn-secondary btn--stack-icon" id="btn-import-backup">${Icons.upload()}<span>Importar</span></button>
+        </div>
+        <input type="file" id="backup-file-input" accept=".json,application/json" hidden>
+      </div>
+    `;
+  }
+
   function renderInicio() {
     if (!dailySummary) {
-      return emptyState('Cargando...');
+      return Promise.resolve(emptyState('Cargando...'));
     }
 
-    const s = dailySummary;
-    return `
+    return Promise.all([DB.getCategories(), DB.getPresentations()]).then(([categories, presentations]) => {
+      const s = dailySummary;
+      let recommendCard = '';
+      if (!importSetupPending && (!categories.length || !presentations.length)) {
+        const missing = [];
+        if (!categories.length) missing.push('categoría');
+        if (!presentations.length) missing.push('presentación');
+        recommendCard = `
+          <div class="card card--recommend">
+            <div class="card-title">Configura tu catálogo</div>
+            <p class="catalog-recommend-hint">
+              Te recomendamos crear al menos una ${missing.join(' y una ')} para organizar tus productos.
+              También puedes empezar con productos sueltos en el catálogo.
+            </p>
+            <div class="btn-group">
+              ${!categories.length ? '<button type="button" class="btn btn-secondary" data-go-catalog-tab="categorias">Crear categoría</button>' : ''}
+              ${!presentations.length ? '<button type="button" class="btn btn-secondary" data-go-catalog-tab="presentaciones">Crear presentación</button>' : ''}
+              <button type="button" class="btn btn-primary" data-go-catalog-tab="productos">Ir al catálogo</button>
+            </div>
+          </div>
+        `;
+      }
+
+      return recommendCard + `
       <div class="stat-grid">
         <div class="stat-box success">
           <div class="value">${DB.formatMoney(s.sales.totalMoney)}</div>
@@ -2175,6 +2319,7 @@ const App = (function () {
         ${renderRecentList(s.sales.items, s.productMap, 'sale', 8)}
       </div>
     `;
+    });
   }
 
   function buildSaleCatalogHelpers(categories, presentations, products) {
@@ -2894,33 +3039,47 @@ const App = (function () {
       }
 
       // Tab productos (catálogo)
-      const catOptions = categories.length
-        ? categories.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')
-        : '';
-      const presOptions = presentations.length
-        ? presentations.map((p) =>
-            `<option value="${p.id}" data-default-price="${p.defaultPrice || 0}" data-default-purchase-price="${p.defaultPurchasePrice || 0}">${escapeHtml(p.name)} (V: ${DB.formatMoney(p.defaultPrice || 0)})</option>`
-          ).join('')
-        : '';
+      const catOptions = '<option value="">— Sin categoría —</option>' + (
+        categories.length
+          ? categories.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')
+          : ''
+      );
+      const presOptions = '<option value="">— Sin presentación —</option>' + (
+        presentations.length
+          ? presentations.map((p) =>
+              `<option value="${p.id}" data-default-price="${p.defaultPrice || 0}" data-default-purchase-price="${p.defaultPurchasePrice || 0}">${escapeHtml(p.name)} (V: ${DB.formatMoney(p.defaultPrice || 0)})</option>`
+            ).join('')
+          : ''
+      );
 
       const firstPresPrice = presentations.length ? (presentations[0].defaultPrice || 0) : 0;
       const firstPresPurchasePrice = presentations.length ? (presentations[0].defaultPurchasePrice || 0) : 0;
 
       const catalog = DB.getCatalogProducts(categories, presentations, products);
       const list = renderCatalogProductView(catalog, categories, presentations, catalogProductView);
+      const standaloneList = renderCatalogStandaloneList(catalog);
 
-      const canAddProduct = categories.length && presentations.length;
-      const addForm = canAddProduct ? `
+      const recommendHint = (!categories.length || !presentations.length)
+        ? '<p class="catalog-recommend-hint">Te recomendamos crear al menos una categoría y una presentación. También puedes agregar productos sin ellas.</p>'
+        : '';
+
+      const addForm = `
         <div class="card">
           <div class="card-title">Nuevo producto</div>
+          ${recommendHint}
           <form id="product-form">
             <div class="form-group">
+              <label for="prod-name">Nombre</label>
+              <input type="text" id="prod-name" maxlength="80" placeholder="Opcional si eliges categoría y presentación">
+              <p class="field-hint">Obligatorio solo si dejas vacíos categoría y presentación.</p>
+            </div>
+            <div class="form-group">
               <label for="prod-category">Categoría</label>
-              <select id="prod-category" required>${catOptions}</select>
+              <select id="prod-category">${catOptions}</select>
             </div>
             <div class="form-group">
               <label for="prod-presentation">Presentación</label>
-              <select id="prod-presentation" required>${presOptions}</select>
+              <select id="prod-presentation">${presOptions}</select>
             </div>
             <div class="form-group">
               <label for="prod-price">Precio venta</label>
@@ -2929,23 +3088,13 @@ const App = (function () {
             <div class="form-group">
               <label for="prod-purchase-price">Precio compra</label>
               <input type="number" id="prod-purchase-price" min="0" step="0.01" value="${firstPresPurchasePrice}" required inputmode="decimal">
-              <p style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">Heredados de la presentación; puedes cambiarlos.</p>
+              <p class="field-hint">Si eliges presentación, se heredan sus precios por defecto.</p>
             </div>
             <button type="submit" class="btn btn-primary">Agregar al catálogo</button>
           </form>
-          <button type="button" class="btn btn-secondary" id="btn-bulk-products" style="margin-top:10px">
+          <button type="button" class="btn btn-secondary" id="btn-bulk-products" style="margin-top:10px"${!categories.length || !presentations.length ? ' disabled' : ''}>
             Agregar varios (categorías × presentaciones)
           </button>
-        </div>
-      ` : `
-        <div class="card">
-          <div class="empty-state">
-            <p>Crea al menos una categoría y una presentación</p>
-            <div class="btn-group" style="margin-top:12px">
-              ${!categories.length ? '<button type="button" class="btn btn-secondary" data-cat-tab="categorias">Categorías</button>' : ''}
-              ${!presentations.length ? '<button type="button" class="btn btn-secondary" data-cat-tab="presentaciones">Presentaciones</button>' : ''}
-            </div>
-          </div>
         </div>
       `;
 
@@ -2955,6 +3104,7 @@ const App = (function () {
           ${renderCatalogViewToolbar()}
           <p class="catalog-view-hint">${catalogViewHint(catalogProductView)}</p>
           ${list}
+          ${standaloneList}
         </div>
       `;
     });
@@ -3092,16 +3242,6 @@ const App = (function () {
           <button type="button" class="btn btn-secondary" data-export="json">JSON</button>
         </div>
       </div>
-      <div class="card">
-        <div class="card-title">Respaldo completo</div>
-        <p class="field-hint">Guarda o restaura catálogo, ventas y movimientos. El archivo JSON se puede enviar por WhatsApp, Gmail u otra app.</p>
-        <div class="backup-buttons">
-          <button type="button" class="btn btn-secondary btn--stack-icon" data-export="backup">${Icons.download()}<span>Descargar</span></button>
-          <button type="button" class="btn btn-secondary btn--stack-icon" data-export="share-backup">${Icons.share()}<span>Compartir</span></button>
-          <button type="button" class="btn btn-secondary btn--stack-icon" id="btn-import-backup">${Icons.upload()}<span>Importar</span></button>
-        </div>
-        <input type="file" id="backup-file-input" accept=".json,application/json" hidden>
-      </div>
     `;
   }
 
@@ -3113,11 +3253,12 @@ const App = (function () {
     const main = $('#main-content');
 
     const renderers = {
-      inicio: () => Promise.resolve(renderInicio()),
+      inicio: renderInicio,
       venta: renderVenta,
       inventario: renderInventario,
       catalogo: renderCatalogo,
-      reportes: () => refreshActiveReportChartRange().then(() => renderReportes())
+      reportes: () => refreshActiveReportChartRange().then(() => renderReportes()),
+      datos: () => Promise.resolve(renderDatos())
     };
 
     const renderer = renderers[currentView];
@@ -3914,6 +4055,66 @@ const App = (function () {
     })();
   }
 
+  function bindDatosUI() {
+    const importNameForm = $('#import-name-form');
+    importNameForm?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const input = $('#import-name-input');
+      const name = (input?.value || '').trim();
+      if (importSetupPending && !name) {
+        notifyError('Ingresa un nombre para continuar');
+        return;
+      }
+      const wasSetup = importSetupPending;
+      DB.setImportMeta({ importName: name })
+        .then((meta) => {
+          appImportMeta = meta;
+          importSetupPending = needsImportSetup(meta);
+          updateHeaderImportName();
+          if (wasSetup && importSetupPending) {
+            notifyError('Ingresa un nombre para continuar');
+            return;
+          }
+          if (wasSetup) {
+            notifySuccess('Listo. Ya puedes usar la app.');
+            setView(lastMainView || 'inicio');
+            return;
+          }
+          notifySuccess(name ? 'Nombre guardado' : 'Nombre eliminado');
+          renderPersist();
+        })
+        .catch((err) => notifyError(err.message || 'No se pudo guardar el nombre'));
+    });
+
+    $('#btn-reset-all-data')?.addEventListener('click', () => {
+      openConfirmModal({
+        title: 'Restaurar desde cero',
+        message: 'Se borrarán TODOS los datos de la app en este dispositivo:\n\n' +
+          '· Catálogo (categorías, presentaciones, productos)\n' +
+          '· Ventas registradas\n' +
+          '· Movimientos de inventario\n' +
+          '· Nombre de importación\n\n' +
+          'Esta acción NO se puede deshacer.\n\n' +
+          'Si necesitas conservar algo, descarga un respaldo en Reportes antes de continuar.\n\n' +
+          '¿Borrar todo y empezar de cero?',
+        confirmLabel: 'Borrar todo',
+        onConfirm: () => DB.resetAllData()
+          .then(() => {
+            resetUiStateAfterImport();
+            dailySummary = null;
+            reportSummary = null;
+            return refreshAppMeta();
+          })
+          .then(() => refreshAllSummaries())
+          .then(() => {
+            lastMainView = 'inicio';
+            notifySuccess('Datos restaurados desde cero');
+            setView('datos');
+          })
+      });
+    });
+  }
+
   function bindBackupUI() {
     const fileInput = $('#backup-file-input');
     $('#btn-import-backup')?.addEventListener('click', () => fileInput?.click());
@@ -3940,8 +4141,10 @@ const App = (function () {
           const prods = data.products?.length || 0;
           const sales = data.sales?.length || 0;
           const movs = data.movements?.length || 0;
+          const importLabel = String(data.meta?.importName || '').trim();
           summary = cats + ' categorías · ' + pres + ' presentaciones · ' + prods + ' productos · ' +
             sales + ' ventas · ' + movs + ' movimientos';
+          if (importLabel) summary += '\n\nNombre del respaldo: «' + importLabel + '»';
         } catch (err) {
           summary = '';
         }
@@ -3955,13 +4158,13 @@ const App = (function () {
           onConfirm: () => DB.importAllData(data)
             .then((result) => {
               resetUiStateAfterImport();
-              return refreshAllSummaries().then(() => result);
+              return refreshAppMeta().then(() => refreshAllSummaries().then(() => result));
             })
             .then((result) => {
-              notifySuccess(
-                'Respaldo importado: ' + result.products + ' productos, ' +
-                result.sales + ' ventas, ' + result.movements + ' movimientos'
-              );
+              let msg = 'Respaldo importado: ' + result.products + ' productos, ' +
+                result.sales + ' ventas, ' + result.movements + ' movimientos';
+              if (result.importName) msg += ' («' + result.importName + '»)';
+              notifySuccess(msg);
               renderPersist();
             })
         });
@@ -3972,7 +4175,7 @@ const App = (function () {
   }
 
   function openBackupFilenameModal(data, mode) {
-    const suggested = Export.defaultBackupFilename();
+    const suggested = suggestedBackupFilename();
     openEditModal({
       title: mode === 'share' ? 'Compartir respaldo' : 'Descargar respaldo',
       fields: [{
@@ -3999,7 +4202,7 @@ const App = (function () {
   }
 
   function runBackupDownload(data) {
-    const suggested = Export.defaultBackupFilename();
+    const suggested = suggestedBackupFilename();
     if (window.showSaveFilePicker) {
       return Export.saveBackupWithPicker(data, suggested)
         .then((savedName) => {
@@ -4048,6 +4251,7 @@ const App = (function () {
   function bindEvents() {
     bindSaleUI();
     bindInventoryUI();
+    bindDatosUI();
 
     // Category form
     const categoryForm = $('#category-form');
@@ -4189,11 +4393,19 @@ const App = (function () {
 
       productForm.addEventListener('submit', (e) => {
         e.preventDefault();
+        const categoryId = $('#prod-category').value;
+        const presentationId = $('#prod-presentation').value;
+        const name = ($('#prod-name')?.value || '').trim();
+        if (!categoryId && !presentationId && !name) {
+          notifyError('Indica un nombre o elige categoría y/o presentación');
+          return;
+        }
         DB.addProduct(
-          $('#prod-category').value,
-          $('#prod-presentation').value,
+          categoryId,
+          presentationId,
           $('#prod-price').value,
-          $('#prod-purchase-price').value
+          $('#prod-purchase-price').value,
+          name
         )
           .then(() => {
             showToast('Producto agregado al catálogo');
@@ -4224,16 +4436,30 @@ const App = (function () {
         Promise.all([DB.getProducts(), DB.getPresentations()]).then(([products, presentations]) => {
           const prod = products.find((x) => x.id === id);
           if (!prod) return;
-          const pres = presentations.find((p) => p.id === prod.presentationId);
+          const pres = prod.presentationId
+            ? presentations.find((p) => p.id === prod.presentationId)
+            : null;
           const prices = DB.resolveProductPrices(prod, pres);
+          const fields = [];
+          if (!prod.categoryId || !prod.presentationId || prod.name) {
+            fields.push({
+              key: 'name',
+              label: 'Nombre',
+              type: 'text',
+              value: prod.name || '',
+              required: !prod.categoryId && !prod.presentationId
+            });
+          }
+          fields.push(
+            { key: 'standardPrice', label: 'Precio venta', type: 'number', value: prices.standardPrice, min: 0, step: '0.01', inputmode: 'decimal' },
+            { key: 'purchasePrice', label: 'Precio compra', type: 'number', value: prices.purchasePrice, min: 0, step: '0.01', inputmode: 'decimal' }
+          );
 
           openEditModal({
             title: 'Editar producto',
-            fields: [
-              { key: 'standardPrice', label: 'Precio venta', type: 'number', value: prices.standardPrice, min: 0, step: '0.01', inputmode: 'decimal' },
-              { key: 'purchasePrice', label: 'Precio compra', type: 'number', value: prices.purchasePrice, min: 0, step: '0.01', inputmode: 'decimal' }
-            ],
+            fields,
             onSave: (vals) => DB.updateProduct(id, {
+              name: vals.name,
               standardPrice: vals.standardPrice,
               purchasePrice: vals.purchasePrice
             })
@@ -4268,6 +4494,13 @@ const App = (function () {
     });
 
     // Tabs
+    document.querySelectorAll('[data-go-catalog-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        catalogTab = btn.dataset.goCatalogTab;
+        setView('catalogo');
+      });
+    });
+
     document.querySelectorAll('[data-cat-tab]').forEach((btn) => {
       btn.addEventListener('click', () => {
         catalogTab = btn.dataset.catTab;
@@ -4360,17 +4593,20 @@ const App = (function () {
   function init() {
     Icons.mount();
     setupModal();
+    setupDatosToggle();
     setupTheme();
 
     document.querySelectorAll('.nav-btn').forEach((btn) => {
       btn.addEventListener('click', () => setView(btn.dataset.view));
     });
 
-    setView('inicio');
-
     DB.open()
+      .then(() => refreshAppMeta())
       .then(() => refreshAllSummaries())
-      .then(() => render())
+      .then(() => {
+        lastMainView = 'inicio';
+        return setView(importSetupPending ? 'datos' : 'inicio');
+      })
       .then(() => hideAppSplash())
       .catch((err) => {
         hideAppSplash();

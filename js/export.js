@@ -259,8 +259,15 @@ const Export = (function () {
     download(JSON.stringify(payload, null, 2), filename, 'application/json;charset=utf-8');
   }
 
-  function defaultBackupFilename() {
-    return 'respaldo-ventas-' + dateStamp(new Date()) + '.json';
+  function defaultBackupFilename(importName) {
+    const date = dateStamp(new Date());
+    const slug = String(importName || '').trim()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9\u00C0-\u024F]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48);
+    if (slug) return 'respaldo-' + slug + '-' + date + '.json';
+    return 'respaldo-ventas-' + date + '.json';
   }
 
   function sanitizeBackupFilename(name, fallback) {

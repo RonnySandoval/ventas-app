@@ -34,11 +34,15 @@
         <div class="header-brand">
           <img src="./icons/icon.png" alt="" class="app-logo" width="40" height="40">
           <div class="header-titles">
+            <p id="import-name" class="import-name" aria-hidden="true"></p>
             <h1 id="page-title">Inicio</h1>
             <p id="page-date" class="page-date"></p>
           </div>
         </div>
-        <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Cambiar tema" data-icon="moon"></button>
+        <div class="header-actions">
+          <button type="button" id="data-toggle" class="header-icon-btn" aria-label="Datos y respaldo" aria-pressed="false" data-icon="database"></button>
+          <button type="button" id="theme-toggle" class="header-icon-btn theme-toggle" aria-label="Cambiar tema" data-icon="moon"></button>
+        </div>
       </div>
     </header>
 

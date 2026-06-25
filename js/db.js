@@ -1,6 +1,6 @@
 const DB = (function () {
   const DB_NAME = 'VentasApp';
-  const DB_VERSION = 6;
+  const DB_VERSION = 7;
   let db = null;
 
   function open() {
@@ -174,6 +174,10 @@ const DB = (function () {
               });
             };
           };
+        }
+
+        if (!database.objectStoreNames.contains('meta')) {
+          database.createObjectStore('meta', { keyPath: 'id' });
         }
       };
 
@@ -356,22 +360,69 @@ const DB = (function () {
     return getAll('products');
   }
 
-  function addProduct(categoryId, presentationId, standardPrice, purchasePrice) {
+  function normalizeProductRefs(categoryId, presentationId) {
+    return {
+      categoryId: categoryId && String(categoryId).trim() ? categoryId : null,
+      presentationId: presentationId && String(presentationId).trim() ? presentationId : null
+    };
+  }
+
+  function isDuplicateProduct(products, candidate, excludeId) {
+    const categoryId = candidate.categoryId || null;
+    const presentationId = candidate.presentationId || null;
+    const nameKey = String(candidate.name || '').trim().toLowerCase();
+    return products.some((p) => {
+      if (excludeId && p.id === excludeId) return false;
+      const pc = p.categoryId || null;
+      const pp = p.presentationId || null;
+      if (categoryId && presentationId) {
+        return pc === categoryId && pp === presentationId;
+      }
+      const pn = String(p.name || '').trim().toLowerCase();
+      return pc === categoryId && pp === presentationId && pn === nameKey;
+    });
+  }
+
+  function buildProductLabel(prod, catName, presName) {
+    const customName = String(prod.name || '').trim();
+    const parts = [];
+    if (customName) parts.push(customName);
+    if (prod.categoryId && catName && catName !== 'Sin categoría') parts.push(catName);
+    if (prod.presentationId && presName && presName !== 'Sin presentación') parts.push(presName);
+    if (!parts.length) {
+      if (!prod.categoryId && !prod.presentationId) return customName || 'Producto';
+      return [catName, presName].filter((x) => x && x !== 'Sin categoría' && x !== 'Sin presentación').join(' — ') || 'Producto';
+    }
+    return parts.join(' — ');
+  }
+
+  function addProduct(categoryId, presentationId, standardPrice, purchasePrice, name) {
+    const refs = normalizeProductRefs(categoryId, presentationId);
+    const productName = String(name || '').trim();
+    if (!refs.categoryId && !refs.presentationId && !productName) {
+      throw new Error('Indica un nombre si el producto no tiene categoría ni presentación');
+    }
+
     return Promise.all([getProducts(), getPresentations()]).then(([products, presentations]) => {
-      const duplicate = products.find(
-        (p) => p.categoryId === categoryId && p.presentationId === presentationId
-      );
-      if (duplicate) {
+      const candidate = {
+        categoryId: refs.categoryId,
+        presentationId: refs.presentationId,
+        name: productName || undefined
+      };
+      if (isDuplicateProduct(products, candidate)) {
         throw new Error('Ya existe ese producto en el catálogo');
       }
 
-      const pres = presentations.find((p) => p.id === presentationId);
+      const pres = refs.presentationId
+        ? presentations.find((p) => p.id === refs.presentationId)
+        : null;
       const item = {
         id: generateId(),
-        categoryId,
-        presentationId,
+        categoryId: refs.categoryId,
+        presentationId: refs.presentationId,
         createdAt: Date.now()
       };
+      if (productName) item.name = productName;
       return put('products', applyProductPriceOverrides(item, pres, standardPrice, purchasePrice)).then(() => item);
     });
   }
@@ -423,20 +474,33 @@ const DB = (function () {
       const existing = items.find((p) => p.id === id);
       if (!existing) throw new Error('Producto no encontrado');
 
-      const categoryId = data.categoryId !== undefined ? data.categoryId : existing.categoryId;
-      const presentationId = data.presentationId !== undefined ? data.presentationId : existing.presentationId;
+      const categoryId = data.categoryId !== undefined
+        ? normalizeProductRefs(data.categoryId, null).categoryId
+        : (existing.categoryId || null);
+      const presentationId = data.presentationId !== undefined
+        ? normalizeProductRefs(null, data.presentationId).presentationId
+        : (existing.presentationId || null);
 
-      const duplicate = items.find(
-        (p) => p.id !== id && p.categoryId === categoryId && p.presentationId === presentationId
-      );
-      if (duplicate) {
+      const candidate = {
+        categoryId,
+        presentationId,
+        name: data.name !== undefined ? String(data.name).trim() : (existing.name || '')
+      };
+      if (isDuplicateProduct(items, candidate, id)) {
         throw new Error('Ya existe ese producto en el catálogo');
       }
 
-      if (data.categoryId !== undefined) existing.categoryId = data.categoryId;
-      if (data.presentationId !== undefined) existing.presentationId = data.presentationId;
+      if (data.categoryId !== undefined) existing.categoryId = categoryId;
+      if (data.presentationId !== undefined) existing.presentationId = presentationId;
+      if (data.name !== undefined) {
+        const trimmed = String(data.name).trim();
+        if (trimmed) existing.name = trimmed;
+        else delete existing.name;
+      }
 
-      const pres = presentations.find((p) => p.id === existing.presentationId);
+      const pres = existing.presentationId
+        ? presentations.find((p) => p.id === existing.presentationId)
+        : null;
       const presSale = pres?.defaultPrice ?? 0;
       const presBuy = pres?.defaultPurchasePrice ?? 0;
 
@@ -739,16 +803,16 @@ const DB = (function () {
 
     const productMap = {};
     products.forEach((prod) => {
-      const pres = presMap[prod.presentationId];
-      const catName = catMap[prod.categoryId]?.name || 'Sin categoría';
-      const presName = pres?.name || 'Sin presentación';
+      const pres = prod.presentationId ? presMap[prod.presentationId] : null;
+      const catName = prod.categoryId ? (catMap[prod.categoryId]?.name || 'Sin categoría') : 'Sin categoría';
+      const presName = prod.presentationId ? (pres?.name || 'Sin presentación') : 'Sin presentación';
       const prices = resolveProductPrices(prod, pres);
       productMap[prod.id] = {
         ...prod,
         ...prices,
         categoryName: catName,
         presentationName: presName,
-        label: catName + ' — ' + presName
+        label: buildProductLabel(prod, catName, presName)
       };
     });
 
@@ -1016,11 +1080,17 @@ const DB = (function () {
       getPresentations(),
       getProducts(),
       getSales(),
-      getMovements()
-    ]).then(([categories, presentations, products, sales, movements]) => ({
+      getMovements(),
+      getImportMeta()
+    ]).then(([categories, presentations, products, sales, movements, meta]) => ({
       schemaVersion: 1,
       app: 'ventas-app',
       exportedAt: new Date().toISOString(),
+      meta: {
+        importName: meta.importName,
+        importedAt: meta.importedAt,
+        setupComplete: meta.setupComplete
+      },
       categories,
       presentations,
       products,
@@ -1030,6 +1100,68 @@ const DB = (function () {
   }
 
   const BACKUP_STORES = ['categories', 'presentations', 'products', 'sales', 'movements'];
+  const IMPORT_META_ID = 'import';
+
+  function defaultImportMetaRecord() {
+    return {
+      id: IMPORT_META_ID,
+      importName: '',
+      importedAt: null,
+      setupComplete: false,
+      updatedAt: Date.now()
+    };
+  }
+
+  function normalizeImportMeta(record) {
+    const importName = String(record?.importName || '').trim();
+    const setupComplete = record?.setupComplete === true ||
+      (!!importName && record?.setupComplete !== false);
+    return {
+      importName,
+      importedAt: record?.importedAt || null,
+      setupComplete
+    };
+  }
+
+  function getImportMeta() {
+    return tx(['meta'], 'readonly').then(({ stores }) =>
+      promisifyRequest(stores.meta.get(IMPORT_META_ID))
+    ).then((record) => normalizeImportMeta(record || defaultImportMetaRecord()));
+  }
+
+  function setImportMeta(partial) {
+    return tx(['meta'], 'readwrite').then(({ stores }) =>
+      promisifyRequest(stores.meta.get(IMPORT_META_ID))
+    ).then((record) => {
+      const current = record || defaultImportMetaRecord();
+      const next = {
+        id: IMPORT_META_ID,
+        importName: partial.importName !== undefined
+          ? String(partial.importName).trim()
+          : String(current.importName || '').trim(),
+        importedAt: partial.importedAt !== undefined ? partial.importedAt : current.importedAt,
+        setupComplete: partial.setupComplete !== undefined
+          ? !!partial.setupComplete
+          : !!current.setupComplete,
+        updatedAt: Date.now()
+      };
+      if (partial.importName !== undefined && next.importName) {
+        next.setupComplete = true;
+      }
+      return put('meta', next).then(() => normalizeImportMeta(next));
+    });
+  }
+
+  function buildImportMetaFromPayload(payload) {
+    const meta = payload?.meta;
+    return {
+      id: IMPORT_META_ID,
+      importName: String(meta?.importName || '').trim(),
+      importedAt: meta?.importedAt || new Date().toISOString(),
+      setupComplete: true,
+      updatedAt: Date.now()
+    };
+  }
 
   function validateBackupItem(item, label) {
     if (!item || typeof item !== 'object' || !item.id) {
@@ -1055,14 +1187,18 @@ const DB = (function () {
 
   function importAllData(data) {
     const payload = validateBackupPayload(data);
+    const importMeta = buildImportMetaFromPayload(payload);
     return open().then((database) => new Promise((resolve, reject) => {
-      const transaction = database.transaction(BACKUP_STORES, 'readwrite');
+      const storeNames = BACKUP_STORES.concat(['meta']);
+      const transaction = database.transaction(storeNames, 'readwrite');
       transaction.oncomplete = () => resolve({
         categories: payload.categories.length,
         presentations: payload.presentations.length,
         products: payload.products.length,
         sales: payload.sales.length,
-        movements: payload.movements.length
+        movements: payload.movements.length,
+        importName: importMeta.importName,
+        importedAt: importMeta.importedAt
       });
       transaction.onerror = () => reject(transaction.error);
 
@@ -1072,6 +1208,19 @@ const DB = (function () {
       payload.products.forEach((item) => transaction.objectStore('products').put(item));
       payload.sales.forEach((item) => transaction.objectStore('sales').put(item));
       payload.movements.forEach((item) => transaction.objectStore('movements').put(item));
+      transaction.objectStore('meta').put(importMeta);
+    }));
+  }
+
+  function resetAllData() {
+    return open().then((database) => new Promise((resolve, reject) => {
+      const storeNames = BACKUP_STORES.concat(['meta']);
+      const transaction = database.transaction(storeNames, 'readwrite');
+      transaction.oncomplete = () => resolve({ importName: '', importedAt: null, setupComplete: false });
+      transaction.onerror = () => reject(transaction.error);
+
+      BACKUP_STORES.forEach((name) => transaction.objectStore(name).clear());
+      transaction.objectStore('meta').put(defaultImportMetaRecord());
     }));
   }
 
@@ -1110,6 +1259,9 @@ const DB = (function () {
     calculateStock,
     exportAllData,
     importAllData,
+    resetAllData,
+    getImportMeta,
+    setImportMeta,
     getProductMap,
     resolveProductPrices,
     formatTime,
